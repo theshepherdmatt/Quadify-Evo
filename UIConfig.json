@@ -1,0 +1,122 @@
+{
+  "page": { "label": "Quadify", "icon": "fa-cube" },
+  "sections": [
+    {
+      "id": "display_settings",
+      "label": "Display",
+      "element": "section",
+      "icon": "fa-television",
+      "onSave": { "type": "controller", "endpoint": "system_hardware/quadify", "method": "saveDisplay_settings" },
+      "content": [
+        { "id": "enableSpectrum", "element": "switch", "label": "Spectrum (visualiser) On/Off", "value": false },
+
+        {
+          "id": "display_screen",
+          "element": "select",
+          "label": "Screen",
+          "value": "modern-bars",
+          "options": [
+            { "label": "Modern — Bars",         "value": "modern-bars" },
+            { "label": "Modern — Dots",         "value": "modern-dots" },
+            { "label": "Modern — Oscilloscope", "value": "modern-osci" },
+            { "label": "Modern — No Spectrum",  "value": "modern" },
+            { "label": "Digital VU",            "value": "digitalvuscreen" },
+            { "label": "Classic VU",            "value": "vuscreen" },
+            { "label": "Original",              "value": "original" },
+            { "label": "Minimal",               "value": "minimal" }
+          ]
+        },
+
+        {
+          "id": "display_rotate",
+          "element": "select",
+          "label": "Rotate",
+          "description": "",
+          "value": "0",
+          "options": [
+            { "label": "0°",   "value": "0" },
+            { "label": "180°", "value": "180" }
+          ]
+        }
+      ],
+      "saveButton": { "label": "Save", "data": ["enableSpectrum", "display_screen", "display_rotate"] }
+    },
+
+    {
+      "id": "buttons_leds",
+      "label": "GPIO Expander",
+      "element": "section",
+      "icon": "fa-lightbulb-o",
+      "onSave": { "type": "controller", "endpoint": "system_hardware/quadify", "method": "saveButtons_leds" },
+      "content": [
+        { "id": "enableButtonsLED", "element": "switch", "label": "Buttons & LEDs On/Off", "value": true },
+        { "id": "mcp23017_address", "element": "input", "type": "text", "label": "I²C address", "placeholder": "0x20", "value": "0x20", "description": "Hex address of the MCP23017 expander (e.g. 0x20 – 0x27). Default is 0x20." },
+        {
+          "element": "button",
+          "label": "Search / Auto-detect MCP23017",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": { "endpoint": "system_hardware/quadify", "method": "autoDetectMCP", "data": "" }
+          }
+        }
+      ],
+      "saveButton": { "label": "Save", "data": ["enableButtonsLED", "mcp23017_address"] }
+    },
+
+    {
+      "id": "ir_controller",
+      "label": "IR Controller",
+      "element": "section",
+      "icon": "fa-bullseye",
+      "onSave": { "type": "controller", "endpoint": "system_hardware/quadify", "method": "saveIr_controller" },
+      "content": [
+        { "id": "enableIR", "element": "switch", "label": "IR Controller On/Off", "value": false },
+        { "id": "ir_remote_profile", "element": "select", "label": "Remote profile", "value": "", "options": [] },
+        {
+          "element": "button",
+          "label": "Refresh remote list",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": { "endpoint": "system_hardware/quadify", "method": "refreshIRRemotes", "data": "" }
+          }
+        },
+        { "id": "ir_gpio_pin", "element": "input", "type": "number", "label": "GPIO pin (BCM, default 27 = physical 13)", "value": 27,
+          "attributes": [{"property": "min", "value": 2}, {"property": "max", "value": 27}],
+          "description": "BCM GPIO pin number for the IR receiver (2–27). Default is 27 (physical pin 13)." }
+      ],
+      "saveButton": { "label": "Save", "data": ["enableIR", "ir_remote_profile", "ir_gpio_pin"] }
+    },
+
+    {
+      "id": "safety_controls",
+      "label": "Clean On/Off",
+      "element": "section",
+      "icon": "fa-shield",
+      "onSave": { "type": "controller", "endpoint": "system_hardware/quadify", "method": "saveSafety_controls" },
+      "content": [
+        { "id": "safe_shutdown_enabled", "element": "switch", "label": "Safe shutdown button On/Off", "value": false }
+      ],
+      "saveButton": { "label": "Save", "data": ["safe_shutdown_enabled"] }
+    },
+
+    {
+      "id": "actions",
+      "label": "Actions",
+      "element": "section",
+      "icon": "fa-cogs",
+      "content": [
+        {
+          "element": "button",
+          "label": "Restart Quadify",
+          "onClick": {
+            "type": "emit",
+            "message": "callMethod",
+            "data": { "endpoint": "system_hardware/quadify", "method": "restartQuadify", "data": "" }
+          }
+        }
+      ]
+    }
+  ]
+}

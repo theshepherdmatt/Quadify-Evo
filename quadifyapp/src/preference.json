@@ -1,0 +1,35 @@
+{
+  "display_mode": "vuscreen",
+  "clock_font_key": "clock_sans",
+  "show_seconds": false,
+  "show_date": false,
+  "screensaver_enabled": true,
+  "screensaver_type": "geo",
+  "screensaver_timeout": 3600,
+  "oled_brightness": 255,
+  "cava_enabled": true,
+  "display": {
+    "spectrum": true,
+    "screen": "vuscreen",
+    "rotate": 180,
+    "oled_brightness": 255
+  },
+  "controls": {
+    "buttons_led_service": true,
+    "mcp23017_address": "0x32"
+  },
+  "ir": {
+    "enabled": true,
+    "profile": "Xiaomi IR for TV box",
+    "gpio_bcm": 27
+  },
+  "safety": {
+    "safe_shutdown": true
+  },
+  "modern_spectrum_mode": "bars",
+  "ignore_airplay": true,
+  "meta": {
+    "rev": 1,
+    "last_writer": "rotary"
+  }
+}
