@@ -24,7 +24,9 @@ display:
   shutdown_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/shuttingdown.png
   vuscreen_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/pngs/vuscreen.png
   digitalvuscreen_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/pngs/digitalvuscreen.png
-  rotation: 2
+  rst_pin: 24
+  dc_pin: 27
+  rotation: 0
   fonts:
     playback_large:
       path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/fonts/DSEG7Classic-Light.ttf

@@ -45,10 +45,14 @@ class DisplayManager:
 
         # SPI + device (SSD1322 @ 256x64)
         # Guard against hardware being absent/disconnected at startup
+        # Audiophonics Evo Sabre uses RST=GPIO24, DC=GPIO27
+        disp_cfg  = self.config.get('display', self.config)
+        gpio_rst  = int(disp_cfg.get('rst_pin', 24))
+        gpio_dc   = int(disp_cfg.get('dc_pin',  27))
         self.serial = None
         self.oled   = None
         try:
-            self.serial = spi(device=0, port=0)
+            self.serial = spi(device=0, port=0, gpio_RST=gpio_rst, gpio_DC=gpio_dc)
             self.oled   = ssd1322(self.serial, width=256, height=64, rotate=self.rotate)
         except Exception as e:
             self.logger.error(

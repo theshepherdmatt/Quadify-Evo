@@ -414,8 +414,8 @@ def main():
         logger.info(f"[on_state_changed] Detected status: {status}")
         if hasattr(volumio_listener.mode_manager, "process_state_change"):
             volumio_listener.mode_manager.process_state_change(sender, state)
-        if not ready_stop_event.is_set() and status == 'play':
-            logger.info("Detected playback start: stopping ready loop.")
+        if not ready_stop_event.is_set() and status in ('play', 'stop', 'pause'):
+            logger.info(f"Detected Volumio status '{status}': stopping ready loop.")
             ready_stop_event.set()
         if status in ['play', 'stop', 'pause', 'unknown'] and not volumio_ready_event.is_set():
             volumio_ready_event.set()

@@ -153,8 +153,9 @@ install_unit_from_template_or_simple() {
   [ -f "$TEMPLATE" ] || TEMPLATE="$PLUGIN_DIR/quadifyapp/services/$SVC"
   DST="/etc/systemd/system/$SVC"
   if [ -f "$TEMPLATE" ]; then
-    log "Installing $SVC from template"
-    run cp "$TEMPLATE" "$DST"
+    log "Installing $SVC from template (path=$PLUGIN_DIR)"
+    sed "s|/data/plugins/system_hardware/[^/]*|$PLUGIN_DIR|g" \
+      "$TEMPLATE" | sudo tee "$DST" >/dev/null
     run chmod 644 "$DST"
     return 0
   fi
@@ -430,10 +431,10 @@ install_unit_from_template_or_simple \
   "/usr/bin/python3 $PLUGIN_DIR/quadifyapp/src/main.py"
 
 install_unit_from_template_or_simple \
- "quadify-buttonsleds.service" \
+  "quadify-buttonsleds.service" \
   "Quadify Buttons & LEDs" \
   "-" \
-  "/usr/bin/python3 /data/plugins/system_hardware/quadify-evo/quadifyapp/scripts/buttonsleds_daemon.py"
+  "/usr/bin/python3 $PLUGIN_DIR/quadifyapp/scripts/buttonsleds_daemon.py"
 
 # ir_listener.service (if script exists)
 if [ -f "$PLUGIN_DIR/quadifyapp/src/hardware/ir_listener.py" ]; then
@@ -461,7 +462,7 @@ install_unit_from_template_or_simple \
   "cava.service" \
   "CAVA Visualizer for Quadify" \
   "-" \
-  "/data/plugins/system_hardware/quadify-evo/cava/bin/cava -p /data/plugins/system_hardware/quadify-evo/cava/config/default_config"
+  "$PLUGIN_DIR/cava/bin/cava -p $PLUGIN_DIR/cava/config/default_config"
 
 # Enable services
 run systemctl daemon-reload
