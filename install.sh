@@ -195,7 +195,12 @@ if [ -f /etc/lirc/irexec.lircrc ]; then
 fi
 
 log "Installing system dependencies…"
-run apt-get update #>/dev/null 2>&1
+# Volumio 4 (Bookworm) ships with Node.js; the nodesource Node 20 repo for
+# bookworm returns 404 and causes apt-get update to fail.  Remove it if present.
+sudo rm -f /etc/apt/sources.list.d/nodesource.list \
+           /etc/apt/sources.list.d/nodesource.list.save \
+           /usr/share/keyrings/nodesource.gpg 2>/dev/null || true
+apt-get update || warn "apt-get update had errors (continuing)"
 run apt-get $APT_OPTS install \
   python3 python3-venv python3-dev python3-all-dev \
   i2c-tools python3-smbus \
