@@ -428,7 +428,7 @@ install_unit_from_template_or_simple \
  "quadify-buttonsleds.service" \
   "Quadify Buttons & LEDs" \
   "-" \
-  "/usr/bin/python3 /data/plugins/system_hardware/quadify/quadifyapp/scripts/buttonsleds_daemon.py"
+  "/usr/bin/python3 /data/plugins/system_hardware/quadify-evo/quadifyapp/scripts/buttonsleds_daemon.py"
 
 # ir_listener.service (if script exists)
 if [ -f "$PLUGIN_DIR/quadifyapp/src/hardware/ir_listener.py" ]; then
@@ -456,7 +456,7 @@ install_unit_from_template_or_simple \
   "cava.service" \
   "CAVA Visualizer for Quadify" \
   "-" \
-  "/data/plugins/system_hardware/quadify/cava/bin/cava -p /data/plugins/system_hardware/quadify/cava/config/default_config"
+  "/data/plugins/system_hardware/quadify-evo/cava/bin/cava -p /data/plugins/system_hardware/quadify-evo/cava/config/default_config"
 
 # Enable services
 run systemctl daemon-reload
