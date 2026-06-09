@@ -437,6 +437,20 @@ def main():
 
     # --- Wait for system clock to be NTP-synced before showing the clock (Pi has no RTC) ---
     def _system_clock_synced():
+        # Fast path: ntpd locked to a source (stratum 1-15) => the clock has been
+        # stepped/disciplined, so the time is now correct. This flips well before
+        # the kernel NTPSynchronized flag does on ntpsec.
+        try:
+            out = subprocess.run(["ntpq", "-c", "rv 0 stratum"],
+                                 capture_output=True, text=True, timeout=3).stdout
+            for tok in out.replace(",", " ").split():
+                if tok.startswith("stratum="):
+                    st = int(tok.split("=")[1])
+                    if 1 <= st <= 15:
+                        return True
+        except Exception:
+            pass
+        # Fallback: kernel sync flag, then a sane-year floor.
         try:
             out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
                                  capture_output=True, text=True, timeout=3).stdout.strip()
