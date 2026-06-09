@@ -362,6 +362,29 @@ class DisplayManager:
         self.clear_screen()
         self.logger.info("DisplayManager: cleared display.")
 
+    def sleep(self):
+        """Power the OLED panel off (deep idle) via ssd1322 hide().
+        Framebuffer is preserved; wake() restores the image."""
+        with self.lock:
+            if self.oled is None:
+                return
+            try:
+                self.oled.hide()
+                self.logger.info("DisplayManager: OLED panel off (sleep).")
+            except Exception as e:
+                self.logger.warning(f"OLED sleep failed: {e}")
+
+    def wake(self):
+        """Power the OLED panel back on via ssd1322 show()."""
+        with self.lock:
+            if self.oled is None:
+                return
+            try:
+                self.oled.show()
+                self.logger.info("DisplayManager: OLED panel on (wake).")
+            except Exception as e:
+                self.logger.warning(f"OLED wake failed: {e}")
+
     def cleanup(self):
         """Release hardware resources. Call once when the process is shutting down."""
         if self._watch_stop:
