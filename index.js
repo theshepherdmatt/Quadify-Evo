@@ -694,7 +694,7 @@ ControllerQuadify.prototype.getUIConfig = function () {
 
     setRaw('safety_controls', 'safe_shutdown_enabled', !!pref.safety.safe_shutdown);
 
-    // ---- Legacy back-compat mirrors (safe no-ops if sections don’t exist) ----
+    // ---- Legacy back-compat mirrors (safe no-ops if sections don't exist) ----
     const flatConfig = getFlatConfig(this.config.get() || {});
     if (flatConfig.mcp23017_address !== undefined) {
       flatConfig.mcp23017_address = coerceHexAddr(flatConfig.mcp23017_address);
@@ -1107,7 +1107,7 @@ ControllerQuadify.prototype.autoDetectMCP = function () {
       return defer.resolve({ mcp23017_address: noPrefix });
     }
 
-    // Not found: don’t change YAML; just notify
+    // Not found: don't change YAML; just notify
     this.saveConfigYaml(cfg);
     this.commandRouter.pushToastMessage('error', 'Quadify', 'No MCP23017 board detected');
     return defer.resolve();
@@ -1257,7 +1257,7 @@ ControllerQuadify.prototype.saveDisplay_settings = function (data) {
 ControllerQuadify.prototype.saveIr_controller = async function (data) {
   const self = this;
   const flat = getFlatConfig(data || {});
-  self.logger.info(‘[Quadify] saveIr_controller flat: ‘ + JSON.stringify(flat));
+  self.logger.info('[Quadify] saveIr_controller flat: ' + JSON.stringify(flat));
   const cfg  = self.loadConfigYaml();
 
   // 1) Persist GPIO pin to YAML and ensure overlay (async write to /boot)
@@ -1266,12 +1266,12 @@ ControllerQuadify.prototype.saveIr_controller = async function (data) {
       cfg.ir_gpio_pin = parseInt(flat.ir_gpio_pin, 10) || 27;
       self.saveConfigYaml(cfg);
       try { await ensureIrOverlay(cfg.ir_gpio_pin); }
-      catch (e) { self.logger.warn(‘[Quadify] ensureIrOverlay failed: ‘ + friendlyErr(e)); }
+      catch (e) { self.logger.warn('[Quadify] ensureIrOverlay failed: ' + friendlyErr(e)); }
     }
   } catch (e) {
     const msg = friendlyErr(e);
-    self.logger.error(‘[Quadify] Failed to write IR GPIO to YAML: ‘ + msg);
-    self.commandRouter.pushToastMessage(‘error’, ‘Quadify’, ‘Failed to save IR GPIO pin: ‘ + msg);
+    self.logger.error('[Quadify] Failed to write IR GPIO to YAML: ' + msg);
+    self.commandRouter.pushToastMessage('error', 'Quadify', 'Failed to save IR GPIO pin: ' + msg);
     return {};
   }
 
@@ -1284,16 +1284,16 @@ ControllerQuadify.prototype.saveIr_controller = async function (data) {
     pref = buildCanonicalFromAny(raw, hwCfg);
 
     if (flat.enableIR !== undefined)          pref.ir.enabled = logicValue(flat.enableIR);
-    if (flat.ir_remote_profile !== undefined) pref.ir.profile = String(flat.ir_remote_profile || ‘’);
+    if (flat.ir_remote_profile !== undefined) pref.ir.profile = String(flat.ir_remote_profile || '');
 
     if (pref.ir.enabled) {
-      if (!pref.ir.profile) throw new Error(‘IR enabled but no profile selected’);
+      if (!pref.ir.profile) throw new Error('IR enabled but no profile selected');
       try {
         await self.installIrProfile(pref.ir.profile);
       } catch (e) {
         const msg = friendlyErr(e);
         const friendly = /sudo|password|permission denied|EACCES/i.test(msg)
-          ? ‘Permission denied writing /etc/lirc (sudo required).’
+          ? 'Permission denied writing /etc/lirc (sudo required).'
           : msg;
         throw new Error(friendly);
       }
@@ -1303,8 +1303,8 @@ ControllerQuadify.prototype.saveIr_controller = async function (data) {
     await saveCanonicalPreference(merged);
   } catch (err) {
     const msg = friendlyErr(err);
-    self.logger.error(‘[Quadify] saveIr_controller: ‘ + msg);
-    self.commandRouter.pushToastMessage(‘error’, ‘Quadify’, `Failed to save IR settings: ${msg}`);
+    self.logger.error('[Quadify] saveIr_controller: ' + msg);
+    self.commandRouter.pushToastMessage('error', 'Quadify', `Failed to save IR settings: ${msg}`);
     return {};
   }
 
@@ -1312,20 +1312,20 @@ ControllerQuadify.prototype.saveIr_controller = async function (data) {
   applyPreferenceToVconfInstance(self.config, pref);
   self.config.save();
 
-  // 4) Toggle services to match desired state, but don’t fail the save if they error
+  // 4) Toggle services to match desired state, but don't fail the save if they error
   const want = !!pref.ir.enabled;
   const results = await libQ.allSettled([
-    self.controlService(‘lircd’,       want),
-    self.controlService(‘ir_listener’, want)
+    self.controlService('lircd',       want),
+    self.controlService('ir_listener', want)
   ]);
 
-  const fails = results.filter(r => r.state === ‘rejected’);
+  const fails = results.filter(r => r.state === 'rejected');
   if (fails.length) {
-    const msgs = fails.map(f => friendlyErr(f.reason)).join(‘ | ‘);
-    self.logger.warn(‘[Quadify] IR service toggle issues: ‘ + msgs);
-    self.commandRouter.pushToastMessage(‘warning’, ‘Quadify’, ‘IR saved, but service toggle had issues: ‘ + msgs);
+    const msgs = fails.map(f => friendlyErr(f.reason)).join(' | ');
+    self.logger.warn('[Quadify] IR service toggle issues: ' + msgs);
+    self.commandRouter.pushToastMessage('warning', 'Quadify', 'IR saved, but service toggle had issues: ' + msgs);
   } else {
-    self.commandRouter.pushToastMessage(‘success’, ‘Quadify’, ‘IR settings saved’);
+    self.commandRouter.pushToastMessage('success', 'Quadify', 'IR settings saved');
   }
 
   return {};
@@ -1351,7 +1351,7 @@ ControllerQuadify.prototype.applyAllServiceTogglesFromPreference = async functio
     `(btnUnit=${this.buttonsLedsUnit || 'n/a'}) screen=${pref.display.screen} rotate=${pref.display.rotate} mcp=${pref.controls.mcp23017_address}`
   );
 
-  // Pre-change snapshot (don’t fail the run if snapshot errors)
+  // Pre-change snapshot (don't fail the run if snapshot errors)
   try { await logSnapshot(this, 'pre-toggles'); }
   catch (e) { this.logger.warn('[Quadify][SNAPSHOT] pre failed: ' + friendlyErr(e)); }
 
