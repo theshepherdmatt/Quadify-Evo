@@ -38,19 +38,14 @@ class ModeManager:
 
 
         {'name': 'streaming',       'on_enter': 'enter_streaming'},
-        {'name': 'playlists',       'on_enter': 'enter_playlists'},
         {'name': 'webradio',        'on_enter': 'enter_webradio'},
         {'name': 'motherearthradio', 'on_enter': 'enter_motherearthradio'},
         {'name': 'radioparadise',   'on_enter': 'enter_radioparadise'},
         {'name': 'radio',           'on_enter': 'enter_radio'},
 
+        # library covers all sub-collections (albums, artists, genres, favourites,
+        # last100, mediaservers, playlists) — differentiated by start_uri kwarg
         {'name': 'library',         'on_enter': 'enter_library'},
-        {'name': 'artists',          'on_enter': 'enter_artists'},
-        {'name': 'albums',          'on_enter': 'enter_albums'},
-        {'name': 'genres',          'on_enter': 'enter_genres'},
-        {'name': 'favourites',      'on_enter': 'enter_favourites'},
-        {'name': 'last100',         'on_enter': 'enter_last100'},
-        {'name': 'mediaservers',    'on_enter': 'enter_mediaservers'},
     ]
 
     def __init__(self, display_manager, clock, volumio_listener,
@@ -135,9 +130,13 @@ class ModeManager:
 
         if self.volumio_listener is not None:
             self.volumio_listener.state_changed.connect(self.process_state_change)
-            self.logger.debug("ModeManager: Connected to volumio_listener.state_changed signal.")
+            self.volumio_listener.disconnected.connect(self._on_volumio_disconnected)
+            self.volumio_listener.connected.connect(self._on_volumio_connected)
+            self.logger.debug("ModeManager: Connected to volumio_listener signals.")
         else:
             self.logger.warning("ModeManager: volumio_listener is None, no state_changed signal linked.")
+
+        self._network_lost = False
 
         self.lock = threading.Lock()
         
@@ -276,7 +275,13 @@ class ModeManager:
             try:
                 with open(self.preference_file_path, "r") as f:
                     file_preferences = json.load(f)
-                    default_preferences.update(file_preferences)
+                    # Only overlay the keys that ModeManager actually owns.
+                    # A blanket dict.update() would let stale/corrupt/unknown keys
+                    # (including nested dicts from the canonical format) pollute
+                    # self.config (#14).
+                    for k in list(default_preferences):
+                        if k in file_preferences:
+                            default_preferences[k] = file_preferences[k]
                     self.logger.info(f"Loaded preferences: {default_preferences}")
             except (json.JSONDecodeError, IOError) as e:
                 self.logger.warning(f"Failed to load preferences. Using defaults. Error: {e}")
@@ -346,7 +351,8 @@ class ModeManager:
             self.logger.debug("ModeManager: State changes allowed.")
 
     def is_state_change_suppressed(self):
-        return self.suppress_state_changes
+        with self.lock:  # consistent with suppress/allow_state_change (#22)
+            return self.suppress_state_changes
 
     # --- Idle / Screensaver Methods ---
     def reset_idle_timer(self):
@@ -371,13 +377,16 @@ class ModeManager:
             self.logger.debug("ModeManager: Idle timer canceled.")
 
     def _idle_timeout_reached(self):
+        # Read state under lock, then perform the FSM transition outside it.
+        # Holding the lock across a transition risks deadlock because on_enter
+        # callbacks call stop_all_screens() which may also need resources (#6).
         with self.lock:
             current_mode = self.get_mode()
-            if current_mode == "clock":
-                self.logger.debug("ModeManager: Idle timeout => to_screensaver.")
-                self.to_screensaver()
-            else:
-                self.logger.debug(f"ModeManager: Idle in '{current_mode}', not going to screensaver.")
+        if current_mode == "clock":
+            self.logger.debug("ModeManager: Idle timeout => to_screensaver.")
+            self.to_screensaver()
+        else:
+            self.logger.debug(f"ModeManager: Idle in '{current_mode}', not going to screensaver.")
 
     # --- Transitions Definition ---
     def _define_transitions(self):
@@ -405,21 +414,11 @@ class ModeManager:
         self.machine.add_transition('to_radioparadise', source='*', dest='radioparadise', before='push_current_state')  
 
         self.machine.add_transition('to_library',      source='*', dest='library', before='push_current_state')
-        self.machine.add_transition('to_albums',        source='*', dest='albums', before='push_current_state')
-        self.machine.add_transition('to_artists',       source='*', dest='artists', before='push_current_state')
-        self.machine.add_transition('to_genres',        source='*', dest='genres', before='push_current_state')
-        self.machine.add_transition('to_favourites',    source='*', dest='favourites', before='push_current_state')
-        self.machine.add_transition('to_last100',       source='*', dest='last100', before='push_current_state')
-        self.machine.add_transition('to_mediaservers',  source='*', dest='mediaservers', before='push_current_state')
-        self.machine.add_transition('to_playlists',    source='*', dest='playlists', before='push_current_state')
 
     # --- Custom trigger() Method ---
     def trigger(self, event_name, **kwargs):
-        # For events other than "back", push current state onto the stack.
-        if event_name != "back" and self.state is not None:
-            self.mode_stack.append(self.state)
-            self.logger.debug("ModeManager: Pushed '%s' onto stack. Stack now: %s", self.state, self.mode_stack)
-        # Look up the auto-generated event method on self.
+        # The FSM transition itself fires push_current_state via before=.
+        # Do NOT push here — doing so would push twice per transition (#1).
         event_method = getattr(self, event_name, None)
         if callable(event_method):
             event_method(**kwargs)
@@ -469,7 +468,7 @@ class ModeManager:
             self.system_update_menu.stop_mode()
             
     def start_menu_inactivity_timer(self):
-        if self.get_mode() in ["library", "tidal", "qobuz", "spotify"]:
+        if self.get_mode() in ["library", "streaming"]:
             self.logger.debug("ModeManager: Inactivity timer skipped for '%s' mode.", self.get_mode())
             return
 
@@ -684,15 +683,42 @@ class ModeManager:
 
 
     def enter_library(self, event):
-        self.logger.info("ModeManager: Entering 'library' state.")
+        start_uri = (event.kwargs or {}).get('start_uri')
+        self.logger.info("ModeManager: Entering 'library' state (uri=%s).", start_uri or 'root')
         self.stop_all_screens()
         if self.library_manager:
-            self.library_manager.start_mode()
+            if start_uri:
+                self.library_manager.start_mode(start_uri=start_uri)
+            else:
+                self.library_manager.start_mode()
             self.logger.info("ModeManager: LibraryManager started.")
         else:
             self.logger.warning("ModeManager: No library_manager set.")
         self.reset_idle_timer()
         self.update_current_mode()
+
+    # Shims: fold sub-collection states into the single 'library' FSM state.
+    # Callers use these names; the FSM only needs one state entry point.
+    def to_playlists(self):
+        self.to_library(start_uri="playlists")
+
+    def to_albums(self):
+        self.to_library(start_uri="albums://")
+
+    def to_artists(self):
+        self.to_library(start_uri="artists://")
+
+    def to_genres(self):
+        self.to_library(start_uri="genres://")
+
+    def to_favourites(self):
+        self.to_library(start_uri="favourites")
+
+    def to_last100(self):
+        self.to_library(start_uri="Last_100")
+
+    def to_mediaservers(self):
+        self.to_library(start_uri="upnp")
 
     def enter_radio(self, event):
         self.logger.info("ModeManager: Entering 'radio' state.")
@@ -715,83 +741,6 @@ class ModeManager:
             self.logger.warning("ModeManager: No webradio_screen set.")
         self.update_current_mode()
         self.cancel_menu_inactivity_timer()  # No timeout on clock
-
-    def enter_playlists(self, event):
-        self.logger.info("ModeManager: Entering 'playlist' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="playlists")
-            self.logger.info("ModeManager: LibraryManager started for Playlists.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
-
-    def enter_albums(self, event):
-        self.logger.info("ModeManager: Entering 'albums' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="albums://")
-            self.logger.info("ModeManager: LibraryManager started for Albums.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
-
-    def enter_genres(self, event):
-        self.logger.info("ModeManager: Entering 'genres' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="genres://")
-            self.logger.info("ModeManager: LibraryManager started for Genres.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
-
-    def enter_artists(self, event):
-        self.logger.info("ModeManager: Entering 'artists' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="artists://")
-            self.logger.info("ModeManager: LibraryManager started for Artist.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
-
-    def enter_favourites(self, event):
-        self.logger.info("ModeManager: Entering 'favourites' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="favourites")
-            self.logger.info("ModeManager: LibraryManager started for favourites.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
-
-    def enter_last100(self, event):
-        self.logger.info("ModeManager: Entering 'last100' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="Last_100")
-            self.logger.info("ModeManager: LibraryManager started for Last 100.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
-
-    def enter_mediaservers(self, event):
-        self.logger.info("ModeManager: Entering 'media servers' state.")
-        self.stop_all_screens()
-        if self.library_manager:
-            self.library_manager.start_mode(start_uri="upnp")
-            self.logger.info("ModeManager: LibraryManager started for Media Servers.")
-        else:
-            self.logger.warning("ModeManager: No library_manager set.")
-        self.reset_idle_timer()
-        self.update_current_mode()
 
     def enter_radioparadise(self, event):
         self.logger.info("ModeManager: Entering 'radioparadise' state.")
@@ -847,6 +796,24 @@ class ModeManager:
             self.airplay_screen.start_mode()
 
     # --- Playback / Volumio State Handling ---
+    def _on_volumio_disconnected(self, sender, **kwargs):
+        """Show a brief reconnecting indicator on the OLED when Volumio drops."""
+        self._network_lost = True
+        self.logger.warning("ModeManager: Volumio disconnected — showing reconnecting overlay.")
+        try:
+            self.display_manager.display_text(
+                "RECONNECTING...", position=(0, 54),
+                font_key='data_font', fill="white"
+            )
+        except Exception as e:
+            self.logger.error("ModeManager: Failed to show reconnecting overlay: %s", e)
+
+    def _on_volumio_connected(self, sender, **kwargs):
+        """Clear the reconnecting overlay once Volumio reconnects."""
+        self._network_lost = False
+        self.logger.info("ModeManager: Volumio reconnected — resuming normal display.")
+        # The next state_changed update will overwrite the overlay naturally.
+
     def process_state_change(self, sender, state, **kwargs):
         with self.lock:
             if self.suppress_state_changes:
@@ -949,13 +916,16 @@ class ModeManager:
             self.logger.debug("ModeManager: Canceled pause/stop timer.")
 
     def switch_to_clock_if_still_stopped_or_paused(self):
+        # Read state and clear the timer reference under lock, then transition
+        # outside it to avoid holding the lock across on_enter callbacks (#6).
         with self.lock:
-            if self.current_status in ["pause", "stop"]:
-                self.to_clock()
-                self.logger.debug("ModeManager: Reverted to clock after pause/stop timer.")
-            else:
-                self.logger.debug("Playback resumed or changed; staying in current mode.")
+            should_switch = self.current_status in ["pause", "stop"]
             self.pause_stop_timer = None
+        if should_switch:
+            self.to_clock()
+            self.logger.debug("ModeManager: Reverted to clock after pause/stop timer.")
+        else:
+            self.logger.debug("Playback resumed or changed; staying in current mode.")
 
     def update_current_mode(self):
         try:
@@ -997,9 +967,8 @@ class ModeManager:
     def back(self):
         current_mode = self.get_mode()
 
-        if current_mode in ["library", "configmenu", "playlists", "webradio",
-                            "motherearthradio", "radioparadise", "albums",
-                            "artists", "genres", "favourites", "last100", "mediaservers", "streaming"]:
+        if current_mode in ["library", "configmenu", "webradio",
+                            "motherearthradio", "radioparadise", "streaming"]:
             # Any sub-menu -> go to main menu
             self.to_menu()
 
@@ -1015,7 +984,78 @@ class ModeManager:
             # Fallback: always go to menu
             self.to_menu()
 
+    # ---------- Unified input dispatch (#19) ----------
+
+    _STREAMING_MODES = frozenset(
+        ("streaming", "tidal", "qobuz", "spotify", "radioparadise", "motherearthradio")
+    )
+    _LIBRARY_MODES = frozenset(("library",))
+
+    def dispatch_scroll(self, direction: int):
+        """Route a scroll event to the right manager for the current mode.
+        Called by both the rotary encoder path and the IR command socket."""
+        mode = self.get_mode()
+        if mode == 'menu' and self.menu_manager:
+            self.menu_manager.scroll_selection(direction)
+        elif mode == 'configmenu' and self.config_menu:
+            self.config_menu.scroll_selection(direction)
+        elif mode == 'systemupdate' and self.system_update_menu:
+            self.system_update_menu.scroll_selection(direction)
+        elif mode == 'clockmenu' and self.clock_menu:
+            self.clock_menu.scroll_selection(direction)
+        elif mode == 'screensavermenu' and self.screensaver_menu:
+            self.screensaver_menu.scroll_selection(direction)
+        elif mode == 'radio' and self.radio_manager:
+            self.radio_manager.scroll_selection(direction)
+        elif mode in self._LIBRARY_MODES and self.library_manager:
+            self.library_manager.scroll_selection(direction)
+        elif mode in self._STREAMING_MODES and self.streaming_manager:
+            self.streaming_manager.scroll_selection(direction)
+        elif mode == 'screensaver':
+            self.exit_screensaver()
+        else:
+            self.logger.debug("dispatch_scroll: no handler for mode '%s'", mode)
+
+    def dispatch_select(self):
+        """Route a select/confirm event to the right manager for the current mode.
+        Called by both the rotary encoder path and the IR command socket."""
+        mode = self.get_mode()
+        if mode == 'menu' and self.menu_manager:
+            self.menu_manager.select_item()
+        elif mode == 'configmenu' and self.config_menu:
+            self.config_menu.select_item()
+        elif mode == 'systemupdate' and self.system_update_menu:
+            self.system_update_menu.select_item()
+        elif mode == 'screensavermenu' and self.screensaver_menu:
+            self.screensaver_menu.select_item()
+        elif mode == 'clockmenu' and self.clock_menu:
+            self.clock_menu.select_item()
+        elif mode in self._LIBRARY_MODES and self.library_manager:
+            self.library_manager.select_item()
+        elif mode in self._STREAMING_MODES and self.streaming_manager:
+            self.streaming_manager.select_item()
+        elif mode == 'radio' and self.radio_manager:
+            self.radio_manager.select_item()
+        elif mode in ('original', 'modern', 'minimal', 'vuscreen', 'digitalvuscreen', 'webradio'):
+            screen_map = {
+                'original':      self.original_screen,
+                'modern':        self.modern_screen,
+                'minimal':       self.minimal_screen,
+                'vuscreen':      self.vu_screen,
+                'digitalvuscreen': self.digitalvu_screen,
+                'webradio':      self.webradio_screen,
+            }
+            screen = screen_map.get(mode)
+            if screen:
+                screen.toggle_play_pause()
+        elif mode == 'clock':
+            self.trigger("to_menu")
+        elif mode == 'screensaver':
+            self.exit_screensaver()
+        else:
+            self.logger.debug("dispatch_select: no handler for mode '%s'", mode)
+
     def get_mode(self):
         return self.state
-        
-        
+
+

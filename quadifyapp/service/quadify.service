@@ -1,6 +1,7 @@
 [Unit]
 Description=Main Quadify Service
-After=network.target
+After=network.target volumio.service
+Wants=volumio.service
 
 [Service]
 Type=simple
@@ -10,6 +11,9 @@ ExecStart=/usr/bin/python3 /data/plugins/system_hardware/quadify/quadifyapp/src/
 ExecStop=/usr/bin/python3 /data/plugins/system_hardware/quadify/quadifyapp/service/reset_oled_gpio.py
 Restart=on-failure
 Environment="PYTHONUNBUFFERED=1"
+TimeoutStopSec=10
+KillSignal=SIGTERM
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target

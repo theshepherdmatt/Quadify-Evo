@@ -3,7 +3,7 @@ import os
 import time
 import threading
 import yaml
-from PIL import Image, ImageDraw, ImageFont, ImageSequence
+from PIL import Image, ImageDraw, ImageFont
 from luma.core.interface.serial import spi
 from luma.oled.device import ssd1322
 
@@ -68,6 +68,25 @@ class DisplayManager:
 
         # Mode change callbacks
         self.on_mode_change_callbacks = []
+
+        # Burn-in pixel shift: cycle through a ring of tiny offsets
+        # to prevent static content from permanently damaging OLED pixels.
+        # shift_interval_s: seconds per shift step (default 60)
+        # max_shift: maximum pixel offset in x and y (default 2)
+        _si = int((self.config.get("display") or {}).get("pixel_shift_interval", 60))
+        _ms = int((self.config.get("display") or {}).get("pixel_shift_max", 2))
+        self._shift_interval = _si
+        self._shift_max = _ms
+        # Positions cycle: (0,0),(max,0),(max,max),(0,max),(-max,max),
+        #                  (-max,0),(-max,-max),(0,-max),(max,-max)
+        self._shift_ring = [(0, 0)] + [
+            (dx, dy)
+            for dx in range(-_ms, _ms + 1, max(1, _ms))
+            for dy in range(-_ms, _ms + 1, max(1, _ms))
+            if not (dx == 0 and dy == 0)
+        ]
+        self._shift_index = 0
+        self._shift_last_ts = time.time()
 
         # Optional YAML watcher
         self._watch_stop = None
@@ -282,6 +301,14 @@ class DisplayManager:
             except Exception as e:
                 self.logger.error(f"Failed to load image '{image_path}': {e}")
 
+    def _current_shift(self):
+        """Return (dx, dy) for the current burn-in shift step, advancing if due."""
+        now = time.time()
+        if now - self._shift_last_ts >= self._shift_interval:
+            self._shift_last_ts = now
+            self._shift_index = (self._shift_index + 1) % len(self._shift_ring)
+        return self._shift_ring[self._shift_index]
+
     def display_pil(self, image, resize=False):
         """Primary hook for MenuManager: hand me a PIL.Image and I’ll show it."""
         if image is None or not self.oled:
@@ -294,6 +321,12 @@ class DisplayManager:
                 img = bg
             if resize:
                 img = img.resize(self.oled.size, Image.LANCZOS)
+            # Apply burn-in pixel shift
+            dx, dy = self._current_shift()
+            if dx or dy:
+                canvas = Image.new("RGB", self.oled.size, "black")
+                canvas.paste(img.convert("RGB"), (dx, dy))
+                img = canvas
             self.oled.display(img.convert(self.oled.mode))
 
     # ---------- Transitions / animations ----------
@@ -321,57 +354,6 @@ class DisplayManager:
                 time.sleep(remaining)
         if hasattr(menu, "display_menu"):
             menu.display_menu()
-
-    # ---------- Splash / looped gfx ----------
-
-    def show_logo(self, duration=5):
-        if not self.oled:
-            return
-        logo_path = self._dget('logo_path')
-        if not logo_path:
-            self.logger.debug("No logo path configured.")
-            return
-        try:
-            img = Image.open(logo_path)
-        except Exception as e:
-            self.logger.error(f"Could not load logo from '{logo_path}': {e}")
-            return
-
-        start = time.time()
-        if getattr(img, "is_animated", False):
-            while time.time() - start < duration:
-                for frame in ImageSequence.Iterator(img):
-                    if time.time() - start >= duration:
-                        break
-                    fr = frame.convert("RGB").resize(self.oled.size, Image.LANCZOS).convert(self.oled.mode)
-                    self.oled.display(fr)
-                    time.sleep(frame.info.get('duration', 100) / 1000.0)
-        else:
-            fr = img.convert(self.oled.mode).resize(self.oled.size, Image.LANCZOS)
-            self.oled.display(fr)
-            time.sleep(duration)
-
-    def show_ready_gif_until_event(self, stop_event):
-        if not self.oled:
-            return
-        path = self._dget('ready_loop_path')
-        if not path:
-            self.logger.error("ready_loop_path not set in display config.")
-            return
-        try:
-            gif = Image.open(path)
-        except Exception as e:
-            self.logger.error(f"Could not load ready loop GIF: {e}")
-            return
-
-        self.logger.info("Displaying ready.gif in a loop until event set.")
-        while not stop_event.is_set():
-            for frame in ImageSequence.Iterator(gif):
-                if stop_event.is_set():
-                    return
-                fr = frame.convert("RGB").resize(self.oled.size, Image.LANCZOS).convert(self.oled.mode)
-                self.oled.display(fr)
-                time.sleep(frame.info.get('duration', 100) / 1000.0)
 
     # ---------- Lifecycle ----------
 

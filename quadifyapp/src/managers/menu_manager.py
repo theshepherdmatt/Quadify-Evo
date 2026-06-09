@@ -254,12 +254,14 @@ class MenuManager:
                 text_color = "white" if actual_index == self.current_selection_index else "black"
 
                 lines = label.split('\n')
-                line_height = font.getsize('A')[1]
+                _ab = draw_obj.textbbox((0, 0), 'A', font=font)
+                line_height = _ab[3] - _ab[1]
                 total_h = line_height * len(lines)
                 text_y = y_position + icon_size + 2 - total_h // 2
 
                 for j, line in enumerate(lines):
-                    tw, th = draw_obj.textsize(line, font=font)
+                    _bb = draw_obj.textbbox((0, 0), line, font=font)
+                    tw, th = _bb[2] - _bb[0], _bb[3] - _bb[1]
                     text_x = x + (icon_size - tw) // 2
                     draw_obj.text((text_x, text_y + j * line_height), line, font=font, fill=text_color)
 

@@ -1,8 +1,17 @@
 {
   "permissions": {
     "allow": [
-      "Bash(gh api:*)",
-      "WebFetch(domain:raw.githubusercontent.com)"
+      "Read(//volumio/**)",
+      "Read(///volumio.local/quadify//**)",
+      "Bash(wc -l quadifyapp/src/**/*.py index.js)",
+      "Bash(journalctl -u quadify -n 80 --no-pager)",
+      "Bash(find volumio.localquadify -name icon_provider.py -o -name *icon*provider*)",
+      "Bash(grep -r \"format.*icon\\\\|format.*logo\\\\|DSD.*icon\\\\|MQA.*icon\" volumio.localquadifyquadifyappsrc --include=*.py)",
+      "Bash(ls \"\\\\\\\\volumio.local\\\\quadify\\\\quadifyapp\\\\src\\\\assets\\\\pngs\\\\\")",
+      "Read(///volumio.local/quadify/quadifyapp/src/assets/**)",
+      "Read(///volumio.local/quadify/quadifyapp/src/assets/images/**)",
+      "Bash(ssh volumio@volumio.local \"sudo systemctl status cava.service --no-pager -n 20\")",
+      "Bash(ssh volumio@volumio.local \"sudo journalctl -u cava --no-pager -n 50\")"
     ]
   }
 }

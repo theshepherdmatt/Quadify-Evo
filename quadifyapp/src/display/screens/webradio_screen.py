@@ -1,6 +1,6 @@
 import os
 import logging
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import threading
 import time
 import requests
@@ -184,18 +184,32 @@ class WebRadioScreen:
     # ------------------------------------------------------------------
     # Album Art Helper
     # ------------------------------------------------------------------
+    @staticmethod
+    def _to_oled_art(img):
+        """
+        Convert an image to greyscale with a contrast boost.
+        The SSD1322 is a 4-bit greyscale display; colour images look flat
+        when naively converted.  Boosting contrast compensates.
+        Returns an RGB image (luma converts to device mode on display).
+        """
+        grey = img.convert("L")
+        grey = ImageEnhance.Contrast(grey).enhance(1.5)
+        return grey.convert("RGB")
+
     def get_albumart(self, url):
         """
         Download and return an Image object from the given album art URL.
         If no URL is provided or downloading fails, load the default album art
         specified in the display configuration.
         """
+        disp_cfg = self.display_manager.config.get("display", self.display_manager.config)
+
         if not url:
-            default_path = self.display_manager.config.get("default_album_art")
+            default_path = disp_cfg.get("default_album_art") or \
+                           self.display_manager.config.get("default_album_art")
             if default_path and os.path.exists(default_path):
                 try:
-                    img = Image.open(default_path)
-                    return img.convert("RGB")
+                    return self._to_oled_art(Image.open(default_path))
                 except Exception as e:
                     self.logger.error(f"Failed to load default album art from {default_path}: {e}")
                     return None
@@ -206,17 +220,16 @@ class WebRadioScreen:
         try:
             response = requests.get(url, timeout=3)
             response.raise_for_status()
-            img = Image.open(BytesIO(response.content))
-            return img.convert("RGB")
+            return self._to_oled_art(Image.open(BytesIO(response.content)))
         except Exception as e:
             self.logger.error(f"Failed to load album art from {url}: {e}")
-            default_path = self.display_manager.config.get("default_album_art")
+            default_path = disp_cfg.get("default_album_art") or \
+                           self.display_manager.config.get("default_album_art")
             if default_path and os.path.exists(default_path):
                 try:
-                    img = Image.open(default_path)
-                    return img.convert("RGB")
-                except Exception as e:
-                    self.logger.error(f"Failed to load default album art from {default_path}: {e}")
+                    return self._to_oled_art(Image.open(default_path))
+                except Exception as e2:
+                    self.logger.error(f"Failed to load default album art from {default_path}: {e2}")
                     return None
             return None
 

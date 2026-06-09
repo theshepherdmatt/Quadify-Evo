@@ -153,9 +153,8 @@ install_unit_from_template_or_simple() {
   [ -f "$TEMPLATE" ] || TEMPLATE="$PLUGIN_DIR/quadifyapp/services/$SVC"
   DST="/etc/systemd/system/$SVC"
   if [ -f "$TEMPLATE" ]; then
-    log "Installing $SVC from template (path=$PLUGIN_DIR)"
-    sed "s|/data/plugins/system_hardware/[^/]*|$PLUGIN_DIR|g" \
-      "$TEMPLATE" | sudo tee "$DST" >/dev/null
+    log "Installing $SVC from template"
+    run cp "$TEMPLATE" "$DST"
     run chmod 644 "$DST"
     return 0
   fi
@@ -278,7 +277,7 @@ else
 fi
 
 # -----------------------------
-# 4) I²C/SPI overlays + IR overlay (GPIO 27)
+# 4) I²C/SPI overlays + IR overlay (GPIO 4, Evo Sabre)
 # -----------------------------
 log "Enabling I2C/SPI & IR overlays…"
 
@@ -292,12 +291,16 @@ ensure_cfg() { grep -qxF "$1" "$CONFIG_FILE" || echo "$1" | sudo tee -a "$CONFIG
 ensure_cfg 'dtparam=spi=on'
 ensure_cfg 'dtparam=i2c_arm=on'
 
-# Keep only ONE gpio-ir line; update if it already exists
+# Keep only ONE gpio-ir line; update if it already exists.
+# Evo Sabre IR receiver is on GPIO 4 (BCM).
 if grep -q '^dtoverlay=gpio-ir' "$CONFIG_FILE"; then
-  run sed -i 's/^dtoverlay=gpio-ir.*/dtoverlay=gpio-ir,gpio_pin=27/' "$CONFIG_FILE"
+  run sed -i 's/^dtoverlay=gpio-ir.*/dtoverlay=gpio-ir,gpio_pin=4/' "$CONFIG_FILE"
 else
-  echo 'dtoverlay=gpio-ir,gpio_pin=27' | sudo tee -a "$CONFIG_FILE" >/dev/null
+  echo 'dtoverlay=gpio-ir,gpio_pin=4' | sudo tee -a "$CONFIG_FILE" >/dev/null
 fi
+
+# gpio-poweroff must NOT also claim GPIO 4 — remove any conflicting line.
+run sed -i '/^dtoverlay=gpio-poweroff.*gpiopin=4/d' "$CONFIG_FILE"
 
 # Load modules now (overlays still need a reboot to take effect)
 run modprobe i2c-dev || true
@@ -431,10 +434,10 @@ install_unit_from_template_or_simple \
   "/usr/bin/python3 $PLUGIN_DIR/quadifyapp/src/main.py"
 
 install_unit_from_template_or_simple \
-  "quadify-buttonsleds.service" \
+ "quadify-buttonsleds.service" \
   "Quadify Buttons & LEDs" \
   "-" \
-  "/usr/bin/python3 $PLUGIN_DIR/quadifyapp/scripts/buttonsleds_daemon.py"
+  "/usr/bin/python3 /data/plugins/system_hardware/quadify-evo/quadifyapp/scripts/buttonsleds_daemon.py"
 
 # ir_listener.service (if script exists)
 if [ -f "$PLUGIN_DIR/quadifyapp/src/hardware/ir_listener.py" ]; then
@@ -462,14 +465,14 @@ install_unit_from_template_or_simple \
   "cava.service" \
   "CAVA Visualizer for Quadify" \
   "-" \
-  "$PLUGIN_DIR/cava/bin/cava -p $PLUGIN_DIR/cava/config/default_config"
+  "/data/plugins/system_hardware/quadify-evo/cava/bin/cava -p /data/plugins/system_hardware/quadify-evo/cava/config/default_config"
 
 # Enable services
 run systemctl daemon-reload
 run systemctl enable --now lircd.service || true
 run systemctl enable --now quadify-lirc-post.service || true
 run systemctl enable --now quadify.service || true
-run systemctl disable --now quadify-buttonsleds.service || true
+run systemctl enable --now quadify-buttonsleds.service || true
 systemctl disable --now buttonsleds.service >/dev/null 2>&1 || true
 
 [ -f /etc/systemd/system/ir-listener.service ] && run systemctl enable --now ir-listener.service || true

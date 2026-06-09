@@ -208,12 +208,14 @@ class MinimalScreen(BaseManager):
         # ------------------------------------------------------------------
         service_right = 110
         service_y = 2  # moved upward
-        service_w, service_h = draw.textsize(service_display, font=self.font_service)
+        _bb = draw.textbbox((0, 0), service_display, font=self.font_service)
+        service_w, service_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
         service_x = service_right - service_w
         draw.text((service_x, service_y), service_display, font=self.font_service, fill="white")
 
         sample_text = f"{samplerate} / {bitdepth}"
-        sample_w, sample_h = draw.textsize(sample_text, font=self.font_data)
+        _bb = draw.textbbox((0, 0), sample_text, font=self.font_data)
+        sample_w, sample_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
         sample_x = service_right - sample_w
         sample_y = service_y + service_h
         draw.text((sample_x, sample_y), sample_text, font=self.font_data, fill="white")
@@ -222,7 +224,8 @@ class MinimalScreen(BaseManager):
         # 3) Draw volume below sample text
         # ------------------------------------------------------------------
         vol_str = "vol " + str(volume)
-        vol_w, vol_h = draw.textsize(vol_str, font=self.font_volume)
+        _bb = draw.textbbox((0, 0), vol_str, font=self.font_volume)
+        vol_w, vol_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
         vol_x = service_right - vol_w
         vol_y = sample_y + sample_h - 2
         draw.text((vol_x, vol_y), vol_str, font=self.font_volume, fill="white")
@@ -278,7 +281,8 @@ class MinimalScreen(BaseManager):
             duration_font = self.font_data.font_variant(size=self.font_data.size + 3)
         except Exception:
             duration_font = self.font_data
-        text_w, text_h = duration_font.getsize(current_time)
+        _bb = duration_font.getbbox(current_time)
+        text_w, text_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
         text_x = circle_x + (circle_radius * 2 - text_w) // 2
         text_y = circle_y + (circle_radius * 2 - text_h) // 2
         draw.text((text_x, text_y), current_time, font=duration_font, fill="white")

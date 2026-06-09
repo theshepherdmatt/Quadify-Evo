@@ -1,5 +1,5 @@
 {
-  "display_mode": "vuscreen",
+  "display_mode": "modern",
   "clock_font_key": "clock_sans",
   "show_seconds": false,
   "show_date": false,
@@ -10,7 +10,7 @@
   "cava_enabled": true,
   "display": {
     "spectrum": true,
-    "screen": "vuscreen",
+    "screen": "modern",
     "rotate": 180,
     "oled_brightness": 255
   },
@@ -21,11 +21,12 @@
   "ir": {
     "enabled": true,
     "profile": "Xiaomi IR for TV box",
-    "gpio_bcm": 27
+    "gpio_bcm": 4
   },
   "safety": {
     "safe_shutdown": true
   },
+  "dac_input_index": 0,
   "modern_spectrum_mode": "bars",
   "ignore_airplay": true,
   "meta": {

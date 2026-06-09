@@ -37,7 +37,7 @@ def process_key(key, current_mode):
     elif key == "KEY_OK":
         if current_mode in [
             "menu","streaming","tidal","qobuz","spotify","library","radiomanager",
-            "playlists","screensaver","configmenu","clockmenu","screensavermenu",
+            "screensaver","configmenu","clockmenu","screensavermenu",
             "systemupdate","radioparadise","motherearthradio"
         ]:
             send_command("select")
@@ -66,6 +66,18 @@ def process_key(key, current_mode):
         elif current_mode == "menu":
             send_command("scroll_right")
 
+    elif key == "KEY_PREVIOUS":
+        send_command("skip_previous")
+
+    elif key == "KEY_NEXT":
+        send_command("skip_next")
+
+    elif key == "KEY_MUTE":
+        send_command("mute")
+
+    elif key == "KEY_INPUT":
+        send_command("dac_input")
+
     elif key == "KEY_VOLUMEUP":
         send_command("volume_plus")
 
@@ -76,7 +88,7 @@ def process_key(key, current_mode):
         if current_mode in ["original", "modern", "minimal", "webradio"]:
             send_command("seek_plus")
         elif current_mode in [
-            "streaming","tidal","qobuz","spotify","library","playlists","radiomanager",
+            "streaming","tidal","qobuz","spotify","library","radiomanager",
             "displaymenu","clockmenu","configmenu","screensavermenu","systemupdate",
             "radioparadise","motherearthradio"
         ]:
@@ -86,7 +98,7 @@ def process_key(key, current_mode):
         if current_mode in ["original", "modern", "minimal", "webradio"]:
             send_command("seek_minus")
         elif current_mode in [
-            "streaming","tidal","qobuz","spotify","library","playlists","radiomanager",
+            "streaming","tidal","qobuz","spotify","library","radiomanager",
             "displaymenu","clockmenu","configmenu","screensavermenu","systemupdate",
             "radioparadise","motherearthradio"
         ]:

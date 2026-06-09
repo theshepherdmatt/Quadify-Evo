@@ -21,7 +21,8 @@
       "bookworm"
     ],
     "details": "Integration for Quadify via Python backend.",
-    "changelog": "Initial release with Python integration."
+    "changelog": "Initial release with Python integration.",
+    "manually_installed": true
   },
   "engines": {
     "node": ">=16",

@@ -14,7 +14,7 @@ import lirc
 import os
 import sys
 import signal
-from PIL import Image, ImageSequence
+from PIL import Image, ImageDraw
 
 # UI / Hardware Imports
 from display.screens.clock import Clock
@@ -56,28 +56,6 @@ def load_config(config_path='/config.yaml'):
     return config
 
 
-def show_gif_loop(gif_path, stop_condition, display_manager, logger):
-    """Displays an animated GIF in a loop until stop_condition() returns True."""
-    try:
-        image = Image.open(gif_path)
-        if not getattr(image, "is_animated", False):
-            logger.warning(f"GIF '{gif_path}' is not animated.")
-            return
-    except Exception as e:
-        logger.error(f"Failed to load GIF '{gif_path}': {e}")
-        return
-    logger.info(f"Displaying GIF: {gif_path}")
-    required_size = display_manager.oled.size  # (width, height)
-    while not stop_condition():
-        for frame in ImageSequence.Iterator(image):
-            if stop_condition():
-                return
-            background = Image.new(display_manager.oled.mode, required_size)
-            frame_converted = frame.convert(display_manager.oled.mode)
-            background.paste(frame_converted, (0, 0))
-            display_manager.oled.display(background)
-            frame_duration = frame.info.get('duration', 100) / 1000.0
-            time.sleep(frame_duration)
 
 
 # --------------------------- main ---------------------------
@@ -108,9 +86,18 @@ def main():
     convert_icons_main()
 
     # Turn off LED8 (if present on MCP23017)
+    # Read address from config so it matches the user's preference (#10).
     try:
         import smbus2
-        MCP23017_ADDRESS = 0x20
+        _mcp_raw = config.get('mcp23017_address', 0x20)
+        try:
+            if isinstance(_mcp_raw, int):
+                MCP23017_ADDRESS = _mcp_raw
+            else:
+                _s = str(_mcp_raw).strip().lower()
+                MCP23017_ADDRESS = int(_s, 16) if _s.startswith('0x') else int(_s, 16)
+        except (ValueError, TypeError):
+            MCP23017_ADDRESS = 0x20
         MCP23017_GPIOA = 0x12
         bus = smbus2.SMBus(1)
         current = bus.read_byte_data(MCP23017_ADDRESS, MCP23017_GPIOA)
@@ -119,18 +106,25 @@ def main():
     except Exception as e:
         print(f"Error turning off LED8: {e}")
 
-    # --- Startup Logo ---
-    logger.info("Displaying startup logo...")
-    display_manager.show_logo(duration=6)
-    logger.info("Startup logo display complete.")
-    display_manager.clear_screen()
-    logger.info("Screen cleared after logo display.")
-
-    # --- Ready/loading orchestration ---
+    # --- Boot orchestration ---
     volumio_ready_event = threading.Event()
-    min_loading_event = threading.Event()
     ready_stop_event = threading.Event()
-    MIN_LOADING_DURATION = 6  # seconds
+
+    # Show a simple "Starting up..." message until Volumio is ready
+    try:
+        from PIL import ImageDraw as _ID, ImageFont as _IF
+        _w, _h = display_manager.oled.size
+        _img = Image.new("RGB", (_w, _h), "black")
+        _d = ImageDraw.Draw(_img)
+        _font = display_manager.fonts.get("song_font", _IF.load_default())
+        _msg = "Starting up..."
+        _bb = _font.getbbox(_msg)
+        _tw, _th = _bb[2] - _bb[0], _bb[3] - _bb[1]
+        _d.text(((_w - _tw) // 2, (_h - _th) // 2), _msg, font=_font, fill="white")
+        display_manager.display_pil(_img)
+    except Exception as e:
+        logger.warning("Could not show startup message: %s", e)
+        display_manager.clear_screen()
 
     # --- VolumioListener (early) ---
     volumio_cfg = config.get('volumio', {})
@@ -167,109 +161,132 @@ def main():
     )
     threading.Thread(target=rotary_control.start, daemon=True).start()
 
-    def is_streaming_mode(mode: str) -> bool:
-        result = mode in ("streaming", "tidal", "qobuz", "spotify", "radioparadise", "motherearthradio")
-        logger.debug(f"is_streaming_mode({mode}) -> {result}")
-        return result
+    # handle_scroll and handle_select have been moved to ModeManager.dispatch_scroll()
+    # and ModeManager.dispatch_select() to avoid duplicate if/elif chains (#19).
+    # The command server and rotary handlers call those methods directly.
 
-    def handle_scroll(direction: int, mode_manager: ModeManager):
-        current_mode = mode_manager.get_mode()
-        logger.debug(f"[IR] handle_scroll(direction={direction}) in mode '{current_mode}'")
-        # Playback screens adjust volume by rotary only (IR arrows map to list scrolling)
-        if current_mode == 'menu':
-            logger.debug("[IR] Scroll -> menu manager")
-            mode_manager.menu_manager.scroll_selection(direction)
-        elif current_mode == 'configmenu':
-            logger.debug("[IR] Scroll -> config menu")
-            mode_manager.config_menu.scroll_selection(direction)
-        elif current_mode == 'systemupdate':
-            logger.debug("[IR] Scroll -> system update menu")
-            mode_manager.system_update_menu.scroll_selection(direction)
-        elif current_mode == 'clockmenu':
-            logger.debug("[IR] Scroll -> clock menu")
-            mode_manager.clock_menu.scroll_selection(direction)
-        elif current_mode == 'screensavermenu':
-            logger.debug("[IR] Scroll -> screensaver menu")
-            mode_manager.screensaver_menu.scroll_selection(direction)
-        elif current_mode == 'radio':
-            logger.debug("[IR] Scroll -> radio manager")
-            mode_manager.radio_manager.scroll_selection(direction)
-        elif current_mode in (
-            'library', 'albums', 'artists', 'genres',
-            'last100', 'mediaservers', 'favourites', 'playlists'
-        ):
-            logger.debug("[IR] Scroll -> library manager")
-            mode_manager.library_manager.scroll_selection(direction)
-        elif is_streaming_mode(current_mode):
-            logger.debug(f"[IR] Scroll -> streaming manager ({current_mode})")
-            mode_manager.streaming_manager.scroll_selection(direction)
-        elif current_mode == 'screensaver':
-            logger.debug("[IR] Scroll -> exit screensaver")
-            mode_manager.exit_screensaver()
-        else:
-            logger.debug("[IR] Scroll -> no action for this mode")
+    # --- DAC input tracker ---
+    _DAC_INPUTS = ["USB", "RPI", "COAX", "OPT", "BT"]
+    _PREF_PATH = "/data/plugins/system_hardware/quadify/quadifyapp/src/preference.json"
 
-    def handle_select(mode_manager: ModeManager):
-        current_mode = mode_manager.get_mode()
-        logger.debug(f"[IR] handle_select() in mode '{current_mode}'")
+    def _load_dac_input_index():
+        try:
+            import json
+            with open(_PREF_PATH, "r") as f:
+                return int(json.load(f).get("dac_input_index", 0))
+        except Exception:
+            return 0
 
-        if current_mode == 'menu':
-            logger.debug("[IR] Select -> menu manager")
-            mode_manager.menu_manager.select_item()
-            return
-        if current_mode == 'configmenu':
-            logger.debug("[IR] Select -> config menu")
-            mode_manager.config_menu.select_item()
-            return
-        if current_mode == 'systemupdate':
-            logger.debug("[IR] Select -> system update menu")
-            mode_manager.system_update_menu.select_item()
-            return
-        if current_mode == 'screensavermenu':
-            logger.debug("[IR] Select -> screensaver menu")
-            mode_manager.screensaver_menu.select_item()
-            return
-        if current_mode == 'clockmenu':
-            logger.debug("[IR] Select -> clock menu")
-            mode_manager.clock_menu.select_item()
-            return
-        if current_mode in (
-            'library', 'albums', 'artists', 'genres',
-            'last100', 'mediaservers', 'favourites', 'playlists'
-        ):
-            logger.debug("[IR] Select -> library manager")
-            mode_manager.library_manager.select_item()
-            return
-        if is_streaming_mode(current_mode):
-            logger.debug(f"[IR] Select -> streaming manager ({current_mode})")
-            mode_manager.streaming_manager.select_item()
-            return
-        if current_mode == 'radio':
-            logger.debug("[IR] Select -> radio manager")
-            mode_manager.radio_manager.select_item()
-            return
+    def _save_dac_input_index(idx):
+        try:
+            import json
+            with open(_PREF_PATH, "r") as f:
+                data = json.load(f)
+            data["dac_input_index"] = idx
+            tmp = _PREF_PATH + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, _PREF_PATH)
+        except Exception as e:
+            logger.warning("Failed to save dac_input_index: %s", e)
 
-        playback_screen_mapping = {
-            'original': 'original_screen',
-            'modern': 'modern_screen',
-            'minimal': 'minimal_screen',
-            'vuscreen': 'vu_screen',
-            'digitalvuscreen': 'digitalvu_screen',
-        }
-        if current_mode in playback_screen_mapping:
-            screen = getattr(mode_manager, playback_screen_mapping[current_mode], None)
-            if screen:
-                logger.debug(f"[IR] Select -> toggle playback ({current_mode})")
-                screen.toggle_play_pause()
-            return
-        if current_mode == 'clock':
-            logger.debug("[IR] Select -> to menu")
-            mode_manager.trigger("to_menu")
-            return
-        if current_mode == 'screensaver':
-            logger.debug("[IR] Select -> exit screensaver")
-            mode_manager.exit_screensaver()
-            return
+    _dac_input_index = [_load_dac_input_index()]  # mutable cell for closure
+    _dac_overlay_timer = [None]
+    _dac_vol_overlay_timer = [None]
+
+    def handle_dac_input():
+        _dac_input_index[0] = (_dac_input_index[0] + 1) % len(_DAC_INPUTS)
+        label = _DAC_INPUTS[_dac_input_index[0]]
+        _save_dac_input_index(_dac_input_index[0])
+        logger.info("DAC input → %s (index %d)", label, _dac_input_index[0])
+        _show_dac_input_overlay(label)
+
+    def _show_dac_input_overlay(label):
+        """Flash input name on OLED for 2 s then let the current screen resume."""
+        from PIL import ImageDraw, ImageFont as _IF
+        if _dac_overlay_timer[0]:
+            _dac_overlay_timer[0].cancel()
+
+        def _draw():
+            try:
+                w, h = display_manager.oled.size
+                img = Image.new("RGB", (w, h), "black")
+                d = ImageDraw.Draw(img)
+                font = display_manager.fonts.get("minimal_service",
+                       display_manager.fonts.get("song_font", _IF.load_default()))
+                bb = font.getbbox(label)
+                tw, th = bb[2] - bb[0], bb[3] - bb[1]
+                d.text(((w - tw) // 2, (h - th) // 2), label, font=font, fill="white")
+                sub = display_manager.fonts.get("data_font", _IF.load_default())
+                tag = "DAC INPUT"
+                tb = sub.getbbox(tag)
+                d.text(((w - (tb[2]-tb[0])) // 2, (h - th) // 2 - 16),
+                       tag, font=sub, fill="white")
+                display_manager.display_pil(img)
+            except Exception as e:
+                logger.warning("dac_input overlay error: %s", e)
+
+        _draw()
+        # After 2 s, poke the active screen to redraw itself
+        def _restore():
+            _dac_overlay_timer[0] = None
+            try:
+                volumio_listener.socketIO.emit("getState", {})
+            except Exception:
+                pass
+        _dac_overlay_timer[0] = threading.Timer(3.5, _restore)
+        _dac_overlay_timer[0].start()
+
+    def _show_dac_volume_overlay(direction):
+        """Show VOL + or VOL - on the OLED for 2 s.
+
+        When ModernScreen is active it owns the draw loop, so we delegate to
+        it rather than writing directly to the display (which would cause the
+        two threads to fight and make the spectrum appear to stop).
+        For all other modes we fall back to writing directly.
+        """
+        from PIL import ImageFont as _IF
+        if _dac_vol_overlay_timer[0]:
+            _dac_vol_overlay_timer[0].cancel()
+            _dac_vol_overlay_timer[0] = None
+
+        # Delegate to ModernScreen if it is the active screen
+        try:
+            _mm = mode_manager  # noqa: F821 — assigned later in main(), valid at call-time
+            if _mm.get_mode() == "modern" and _mm.modern_screen:
+                _mm.modern_screen.show_volume_overlay(direction, duration=2.0)
+                return
+        except (NameError, AttributeError):
+            pass  # mode_manager not yet created (early server) — fall through
+
+        # Fallback: draw directly (original / minimal / other modes)
+        try:
+            w, h = display_manager.oled.size
+            img = Image.new("RGB", (w, h), "black")
+            d = ImageDraw.Draw(img)
+            tag_font = display_manager.fonts.get("playback_medium", _IF.load_default())
+            arrow_font = display_manager.fonts.get("clock_bold", _IF.load_default())
+            sign = "+" if direction > 0 else "-"
+            tag = "VOLUME"
+            tb = tag_font.getbbox(tag)
+            d.text(((w - (tb[2]-tb[0])) // 2, h // 2 - 28), tag, font=tag_font, fill="white")
+            ab = arrow_font.getbbox(sign)
+            aw, ah = ab[2] - ab[0], ab[3] - ab[1]
+            d.text(((w - aw) // 2, h // 2 - ah // 2 + 4), sign, font=arrow_font, fill="white")
+            display_manager.display_pil(img)
+        except Exception as e:
+            logger.warning("dac_volume overlay error: %s", e)
+
+        def _restore():
+            _dac_vol_overlay_timer[0] = None
+            try:
+                volumio_listener.socketIO.emit("getState", {})
+            except Exception:
+                pass
+        _dac_vol_overlay_timer[0] = threading.Timer(2.0, _restore)
+        _dac_vol_overlay_timer[0].start()
 
     # --------------------- IR command socket server ---------------------
 
@@ -308,8 +325,10 @@ def main():
                             continue
 
                         command = data.decode("utf-8").strip()
-                        print(f"Command received: {command}")
                         current_mode = mode_manager.get_mode()
+                        # Log at INFO so normal remote use isn't silent, but avoid
+                        # per-scroll debug floods (#21).
+                        print(f"Command received: {command!r} (mode={current_mode})")
 
                         # Early server: first real press kills this server so UI one can bind
                         if early and not ready_stop_event.is_set() and command in ("menu", "select", "ok", "toggle"):
@@ -320,6 +339,20 @@ def main():
                         if command == "home":
                             mode_manager.trigger("to_clock")
                         elif command == "shutdown":
+                            try:
+                                from PIL import ImageFont as _IF
+                                w, h = display_manager.oled.size
+                                img = Image.new("RGB", (w, h), "black")
+                                d = ImageDraw.Draw(img)
+                                font = display_manager.fonts.get("song_font", _IF.load_default())
+                                msg = "Shutting down..."
+                                bb = font.getbbox(msg)
+                                tw, th = bb[2] - bb[0], bb[3] - bb[1]
+                                d.text(((w - tw) // 2, (h - th) // 2), msg, font=font, fill="white")
+                                display_manager.display_pil(img)
+                                time.sleep(2)
+                            except Exception as e:
+                                logger.warning("shutdown overlay error: %s", e)
                             subprocess.run(["sudo", "/bin/systemctl", "poweroff", "--no-wall"], check=False)
 
                         elif command == "menu":
@@ -331,12 +364,12 @@ def main():
                             pass
 
                         elif command == "select":
-                            handle_select(mode_manager)
+                            mode_manager.dispatch_select()  # (#19)
 
                         elif command in ("scroll_up", "scroll_left"):
-                            handle_scroll(-1, mode_manager)
+                            mode_manager.dispatch_scroll(-1)   # (#19)
                         elif command in ("scroll_down", "scroll_right"):
-                            handle_scroll(+1, mode_manager)
+                            mode_manager.dispatch_scroll(+1)   # (#19)
 
                         elif command == "seek_plus":
                             subprocess.run(["volumio", "seek", "plus"], check=False)
@@ -347,11 +380,13 @@ def main():
                         elif command == "skip_previous":
                             subprocess.run(["volumio", "previous"], check=False)
                         elif command == "volume_plus":
-                            volumio_listener.increase_volume()
+                            _show_dac_volume_overlay(1)
                         elif command == "volume_minus":
-                            volumio_listener.decrease_volume()
+                            _show_dac_volume_overlay(-1)
                         elif command == "back":
                             mode_manager.trigger("back")
+                        elif command == "dac_input":
+                            handle_dac_input()
             except Exception as e:
                 print(f"Error in command server: {e}")
             finally:
@@ -374,85 +409,31 @@ def main():
     make_command_server(dummy_mode_manager, early=True)
     print("Quadify command server thread (early) started.")
 
-    # --- Loading GIF during boot ---
-    def show_loading():
-        loading_gif_path = display_config.get('loading_gif_path', 'loading.gif')
-        try:
-            image = Image.open(loading_gif_path)
-            if not getattr(image, "is_animated", False):
-                logger.warning(f"Loading GIF '{loading_gif_path}' is not animated.")
-                return
-        except IOError:
-            logger.error(f"Failed to load loading GIF '{loading_gif_path}'.")
-            return
-        logger.info("Displaying loading GIF during startup.")
-        display_manager.clear_screen()
-        time.sleep(0.1)
-        while not (volumio_ready_event.is_set() and min_loading_event.is_set()):
-            for frame in ImageSequence.Iterator(image):
-                if volumio_ready_event.is_set() and min_loading_event.is_set():
-                    logger.info("Volumio ready & min load done, stopping loading GIF.")
-                    return
-                display_manager.oled.display(frame.convert(display_manager.oled.mode))
-                frame_duration = frame.info.get('duration', 100) / 1000.0
-                time.sleep(frame_duration)
-        logger.info("Exiting loading GIF display thread.")
-
-    threading.Thread(target=show_loading, daemon=True).start()
-
-    # Minimum loading duration timer
-    def set_min_loading_event():
-        time.sleep(MIN_LOADING_DURATION)
-        min_loading_event.set()
-        logger.info("Minimum loading duration has elapsed.")
-
-    threading.Thread(target=set_min_loading_event, daemon=True).start()
 
     def on_state_changed(sender, state):
         logger.info(f"[on_state_changed] State: {state!r}")
         status = str(state.get('status', '???')).lower()
-        logger.info(f"[on_state_changed] Detected status: {status}")
-        if hasattr(volumio_listener.mode_manager, "process_state_change"):
-            volumio_listener.mode_manager.process_state_change(sender, state)
-        if not ready_stop_event.is_set() and status in ('play', 'stop', 'pause'):
-            logger.info(f"Detected Volumio status '{status}': stopping ready loop.")
-            ready_stop_event.set()
-        if status in ['play', 'stop', 'pause', 'unknown'] and not volumio_ready_event.is_set():
+        # Do NOT call mode_manager.process_state_change here — ModeManager subscribes
+        # directly to volumio_listener.state_changed in its __init__ (#2).
+        ready_stop_event.set()
+        if not volumio_ready_event.is_set():
             volumio_ready_event.set()
 
     volumio_listener.state_changed.connect(on_state_changed)
-    logger.info("Bound on_state_changed to volumio_listener.state_changed")
+    # Also treat a successful socket connection as sufficient to proceed,
+    # in case Volumio connects but doesn't push state immediately.
+    def _on_connected(sender, **kwargs):
+        if not volumio_ready_event.is_set():
+            logger.info("Socket connected — proceeding to UI startup.")
+            volumio_ready_event.set()
+    volumio_listener.connected.connect(_on_connected)
 
-    # Wait for readiness then show ready loop
-    logger.info("Waiting for Volumio readiness & min load time.")
-    volumio_ready_event.wait()
-    min_loading_event.wait()
-    logger.info("Volumio is ready & min loading time passed, proceeding to ready GIF.")
-
-    def show_ready_gif_until_event(stop_event, gif_path):
-        try:
-            image = Image.open(gif_path)
-            if not getattr(image, "is_animated", False):
-                display_manager.oled.display(image.convert(display_manager.oled.mode))
-                return
-            while not stop_event.is_set():
-                for frame in ImageSequence.Iterator(image):
-                    if stop_event.is_set():
-                        return
-                    display_manager.oled.display(frame.convert(display_manager.oled.mode))
-                    frame_duration = frame.info.get('duration', 100) / 1000.0
-                    time.sleep(frame_duration)
-        except Exception as e:
-            logger.error(f"Failed to loop GIF {gif_path}: {e}")
-
-    ready_loop_path = display_config.get('ready_loop_path', 'ready_loop.gif')
-    threading.Thread(
-        target=show_ready_gif_until_event,
-        args=(ready_stop_event, ready_loop_path),
-        daemon=True
-    ).start()
-    ready_stop_event.wait()
-    logger.info("Ready GIF exited, continuing to UI startup.")
+    logger.info("Waiting for Volumio (max 90s)...")
+    volumio_ready_event.wait(timeout=90)
+    if not volumio_ready_event.is_set():
+        logger.warning("Volumio not ready after 90s — starting UI anyway.")
+    ready_stop_event.set()
+    logger.info("Continuing to UI startup.")
 
     # --- Build full UI stack ---
     clock_config = config.get('clock', {})
@@ -476,14 +457,24 @@ def main():
     )
     manager_factory.setup_mode_manager()
     volumio_listener.mode_manager = mode_manager
-    volumio_listener.menu_manager = mode_manager.menu_manager
 
-    # Handoff last early state if any
-    if getattr(dummy_mode_manager, 'last_state', None):
+    # Wire the sources_changed signal emitted by VolumioListener to the menu
+    # refresh.  This replaces the direct menu_manager attribute reference that
+    # was previously kept on VolumioListener (#13).
+    def _on_sources_changed(sender, sources=None, **kwargs):
+        mm = mode_manager.menu_manager
+        if mm:
+            mm.refresh_main_menu()
+            mm.display_menu()
+    volumio_listener.sources_changed.connect(_on_sources_changed)
+
+    # Handoff last early state if any — determine initial screen
+    last_state = getattr(dummy_mode_manager, 'last_state', None)
+    if last_state:
         logger.info("Handing off last Volumio state from DummyModeManager to real ModeManager")
-        mode_manager.process_state_change(volumio_listener, dummy_mode_manager.last_state)
-        status = (dummy_mode_manager.last_state.get("status") or "").lower()
-        service = (dummy_mode_manager.last_state.get("service") or "").lower()
+        mode_manager.process_state_change(volumio_listener, last_state)
+        status = (last_state.get("status") or "").lower()
+        service = (last_state.get("service") or "").lower()
         display_mode = mode_manager.config.get("display_mode", "original")
 
         if status == "play":
@@ -499,50 +490,24 @@ def main():
                 mode_manager.trigger("to_minimal")
             else:
                 mode_manager.trigger("to_original")
-        elif status in ["pause", "stop"]:
-            mode_manager.trigger("to_menu")
         else:
-            mode_manager.trigger("to_menu")
+            # stopped, paused, or unknown — start on clock
+            mode_manager.trigger("to_clock")
+    else:
+        # No state received yet — start on clock, ModeManager will react to pushState
+        mode_manager.trigger("to_clock")
 
     # Start the real command server bound to the real mode_manager
     make_command_server(mode_manager, early=False)
     print("Quadify command server thread (UI) started.")
 
-    # --- Rotary handlers (use same unified handlers) ---
+    # --- Rotary handlers ---
     def on_rotate_ui(direction):
-        current_mode = mode_manager.get_mode()
-
-        # Playback screens use rotary for volume
-        if current_mode == 'original':
-            volume_change = 40 if direction == 1 else -40
-            mode_manager.original_screen.adjust_volume(volume_change)
-            return
-        if current_mode == 'modern':
-            volume_change = 10 if direction == 1 else -20
-            mode_manager.modern_screen.adjust_volume(volume_change)
-            return
-        if current_mode == 'minimal':
-            volume_change = 10 if direction == 1 else -20
-            mode_manager.minimal_screen.adjust_volume(volume_change)
-            return
-        if current_mode == 'vuscreen':
-            volume_change = 10 if direction == 1 else -20
-            mode_manager.vu_screen.adjust_volume(volume_change)
-            return
-        if current_mode == 'digitalvuscreen':
-            volume_change = 10 if direction == 1 else -20
-            mode_manager.digitalvu_screen.adjust_volume(volume_change)
-            return
-        if current_mode == 'webradio':
-            volume_change = 10 if direction == 1 else -20
-            mode_manager.webradio_screen.adjust_volume(volume_change)
-            return
-
-        # All list-type modes (menu, library, streaming, etc.)
-        handle_scroll(direction, mode_manager)
+        # Rotary only scrolls menus — DAC controls hardware volume via IR remote.
+        mode_manager.dispatch_scroll(1 if direction > 0 else -1)
 
     def on_button_press_ui():
-        handle_select(mode_manager)
+        mode_manager.dispatch_select()  # (#19)
 
     def on_long_press_ui():
         current_mode = mode_manager.get_mode()

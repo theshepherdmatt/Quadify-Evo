@@ -11,16 +11,7 @@ volumio:
 
 display:
   default_album_art: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/menus/albumart.jpg
-  loading_gif_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/Loading.gif
-  ready_gif_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/ready.gif
-  ready_new_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/ready_new.gif
-  ready_loop_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/ready_loop.gif
-  connecting_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/connecting.gif
-  connected_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/connected.gif
-  updating_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/updating.gif
-  updatedmessage_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/updatedmessage.gif
   screensaver_gif_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/screensaver/geo.gif
-  logo_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/gif/logo.gif
   shutdown_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/shuttingdown.png
   vuscreen_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/pngs/vuscreen.png
   digitalvuscreen_path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/images/pngs/digitalvuscreen.png
@@ -114,6 +105,15 @@ display:
     clockdate_bold:
       path: /data/plugins/system_hardware/quadify/quadifyapp/src/assets/fonts/Montserrat-Regular.ttf
       size: 10
+  fifo_path: /tmp/display.fifo
+  spectrum_brightness: 60
+  spectrum_peak_brightness: 100
+  spectrum_bar_width: 2
+  spectrum_gap_width: 3
+  vu_alpha_attack: 0.8
+  vu_alpha_release: 0.15
+  pixel_shift_interval: 60
+  pixel_shift_max: 2
   refresh_rate: 60
   cache_images: true
 

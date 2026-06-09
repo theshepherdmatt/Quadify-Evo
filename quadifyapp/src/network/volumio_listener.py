@@ -33,6 +33,9 @@ class VolumioListener:
         self.toast_message_received = Signal('toast_message_received')
         self.navigation_received = Signal()
 
+        # Source-list signal (replaces direct menu_manager call in on_push_browse_sources) (#13)
+        self.sources_changed = Signal('sources_changed')
+
         # Navigation signals for managers
         self.playlists_navigation_received = Signal('playlists_navigation_received')
         self.webradio_navigation_received = Signal('webradio_navigation_received')
@@ -48,9 +51,10 @@ class VolumioListener:
         # Internal state
         self.current_state = {}
         self.state_lock = threading.Lock()
-        self.current_volume = None 
+        self.current_volume = None
         self._running = True
         self._reconnect_attempt = 1
+        self._reconnecting = False  # gate: only one reconnect thread at a time (#7)
 
         # Tracking browseLibrary requests
         self.browse_lock = threading.Lock()
@@ -154,10 +158,13 @@ class VolumioListener:
     def on_connect(self):
         self.connected.send(self)
         self.logger.info("[VolumioListener] Connected to Volumio.")
-        self._reconnect_attempt = 1  # Reset reconnect attempts
+        self._reconnect_attempt = 1
+        self._reconnecting = False  # clear flag so future disconnects can re-arm (#7)
         self.socketIO.emit('getState')
-        # Explicitly browse root after connect (wait a fraction of a second for socket to settle)
-        threading.Timer(0.2, lambda: self.fetch_browse_library("")).start()
+        # Delay the initial browse request slightly so Volumio's socket is fully
+        # settled before we ask it to return navigation data.  500 ms is more
+        # robust than the previous 200 ms on slow/loaded systems (#17).
+        threading.Timer(0.5, lambda: self.fetch_browse_library("")).start()
 
 
     def is_connected(self):
@@ -172,20 +179,18 @@ class VolumioListener:
 
     def on_push_browse_sources(self, data):
         self.logger.info("[VolumioListener] Received pushBrowseSources event.")
-        # Optionally: log the new sources for debug
         self.logger.debug(f"[VolumioListener] Sources: {data}")
-        # Now trigger your menu to refresh.
-        # This could be via a direct reference, signal, or callback—see below!
-        if hasattr(self, "menu_manager"):
-            self.menu_manager.refresh_main_menu()
-            self.menu_manager.display_menu()
-        else:
-            # Or use a signal if you wire it that way
-            if hasattr(self, "sources_changed"):
-                self.sources_changed.send(self, sources=data)
+        # Emit signal — subscribers (e.g. MenuManager) handle the refresh.
+        # VolumioListener must not hold direct references to UI managers (#13).
+        self.sources_changed.send(self, sources=data)
 
     def schedule_reconnect(self):
-        """Schedule a reconnection attempt."""
+        """Schedule a reconnection attempt.  Guards against multiple concurrent
+        reconnect threads when the socket bounces rapidly (#7)."""
+        if self._reconnecting:
+            self.logger.debug("[VolumioListener] Reconnect already scheduled; skipping.")
+            return
+        self._reconnecting = True
         delay = min(self.reconnect_delay * self._reconnect_attempt, 60)
         self.logger.info(f"[VolumioListener] Reconnecting in {delay} seconds...")
         threading.Thread(target=self._reconnect_after_delay, args=(delay,), daemon=True).start()
@@ -193,6 +198,7 @@ class VolumioListener:
     def _reconnect_after_delay(self, delay):
         """Reconnect after a specified delay."""
         time.sleep(delay)
+        self._reconnecting = False  # allow future reconnect attempts regardless of outcome
         if not self.socketIO.connected and self._running:
             self._reconnect_attempt += 1
             self.connect()

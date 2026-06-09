@@ -1,0 +1,17 @@
+[general]
+bars = 36  # Adjust based on your OLED width
+
+lower_cutoff_freq = 30
+higher_cutoff_freq = 20000
+
+[input]
+method = fifo
+source = /tmp/cava.fifo
+
+[output]
+method = raw
+data_format = ascii
+raw_target = /tmp/display.fifo
+ascii_max_range = 255
+bar_delimiter = 59  # ';'
+frame_delimiter = 10  # '\n'

@@ -22,7 +22,6 @@ SWAP_COLUMNS = True  # If your wiring for columns is reversed
 class LED(IntEnum):
     """
     Bits in GPIOA representing each LED.
-    We assume:
       - Button 1 => Play LED
       - Button 2 => Pause LED
       - Button 3 => Previous LED
@@ -30,16 +29,15 @@ class LED(IntEnum):
       - Button 5 => Shuffle LED
       - Button 6 => Repeat LED
       - Button 7 => Spare LED
-      - Button 8 => Reload LED
+      - Button 8 => wired to Evo Sabre hardware power; handled entirely in HW
     """
-    PLAY   = 0b10000000  
-    PAUSE  = 0b01000000  
-    PREV   = 0b00100000
-    NEXT   = 0b00010000
-    SHUFF  = 0b00001000
-    REPEAT = 0b00000100
-    SPARE  = 0b00000010
-    RELOAD = 0b00000001
+    PLAY   = 0b00000001
+    PAUSE  = 0b00000010
+    PREV   = 0b00000100
+    NEXT   = 0b00001000
+    SHUFF  = 0b00010000
+    REPEAT = 0b00100000
+    SPARE  = 0b01000000
 
 class ButtonsLEDController:
     """
@@ -95,8 +93,15 @@ class ButtonsLEDController:
         self.button_thread = None
         self.volumio_monitor_thread = None
 
-        self.button8_down_time = None
-        self.button8_pending = False
+        # Active LED-override timer; cancelled before each new one is started (#8)
+        self._led_timer = None
+
+        # If the I2C bus failed to open, mark the controller as non-functional (#20)
+        if not self.bus:
+            self.logger.error(
+                "ButtonsLEDController: I2C bus unavailable — controller disabled. "
+                "Check wiring and that i2c-dev is loaded."
+            )
 
 
     # in ButtonsLEDController._load_config()
@@ -156,10 +161,14 @@ class ButtonsLEDController:
 
     def stop(self):
         self.running = False
+        # Cancel any pending LED-override timer (#8)
+        if self._led_timer:
+            self._led_timer.cancel()
+            self._led_timer = None
         if self.button_thread and self.button_thread.is_alive():
-            self.button_thread.join()
+            self.button_thread.join(timeout=0.5)   # debounce_delay is 100 ms (#11)
         if self.volumio_monitor_thread and self.volumio_monitor_thread.is_alive():
-            self.volumio_monitor_thread.join()
+            self.volumio_monitor_thread.join(timeout=3)  # poll interval is 2 s (#11)
         # Turn off the LEDs and put columns back to inactive
         self.shutdown_leds()
         # Release the I2C bus so it is not held open across restarts
@@ -180,26 +189,8 @@ class ButtonsLEDController:
                     prev = self.prev_button_state[r][c]
                     btn_id = self.button_map[r][c]
 
-                    # --- Special logic for Button 8 (long press support) ---
-                    if btn_id == 8:
-                        # Button 8 pressed down
-                        if curr == 0 and prev == 1:
-                            self.button8_down_time = time.time()
-                            self.button8_pending = True
-                        # Button 8 released
-                        elif curr == 1 and prev == 0 and self.button8_pending:
-                            held_time = time.time() - self.button8_down_time if self.button8_down_time else 0
-                            if held_time >= 3.0:
-                                self.logger.info("Button 8 long press (restart CAVA only)")
-                                self.restart_cava_only()
-                            else:
-                                self.logger.info("Button 8 short press (restart Quadify)")
-                                self.restart_quadify_only()
-                            self.light_button_led_for(LED.RELOAD, 0.5)
-                            self.button8_pending = False
-
-                    # --- All other buttons (default: short press only) ---
-                    else:
+                    # Button 8 is wired to Evo Sabre hardware power — no software action
+                    if btn_id != 8:
                         if curr == 0 and prev == 1:
                             self.logger.info(f"Button {btn_id} pressed.")
                             self.handle_button_press(btn_id)
@@ -314,15 +305,19 @@ class ButtonsLEDController:
     # -----------------------------------------------------------------
     def light_button_led_for(self, led_enum, duration):
         """
-        ephemeral override => show just this LED for 'duration' seconds,
-        ignoring the play/pause LED.
+        Ephemeral override — show just this LED for 'duration' seconds,
+        ignoring the play/pause LED.  Cancels any previously running timer so
+        rapid button presses don't prematurely wipe a newer LED (#8).
         """
+        if self._led_timer:
+            self._led_timer.cancel()
         self.current_button_led_state = led_enum.value
         self.control_leds()
-        t = threading.Timer(duration, self.reset_button_led)
-        t.start()
+        self._led_timer = threading.Timer(duration, self.reset_button_led)
+        self._led_timer.start()
 
     def reset_button_led(self):
+        self._led_timer = None
         self.current_button_led_state = 0
         self.control_leds()
 

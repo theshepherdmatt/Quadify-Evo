@@ -1,8 +1,11 @@
 # src/display/screens/vu_screen.py
+import fcntl
 import logging
-import threading
-import os
 import math
+import os
+import select
+import subprocess
+import threading
 import time
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 from managers.menus.base_manager import BaseManager
@@ -70,6 +73,17 @@ class VUScreen(BaseManager):
         self.spectrum_thread  = None
         self.running_spectrum = False
         self.spectrum_bars    = [0] * 36
+        _disp_cfg = display_manager.config.get("display", display_manager.config)
+        self.fifo_path = _disp_cfg.get("fifo_path", FIFO_PATH)
+
+        # ---------- VU ballistics ----------
+        # Fast attack (0.8) / slow release (0.15) gives the classic VU meter feel.
+        # alpha_attack ≈ 0.8 → reaches ~90 % of peak in ~1 frame (fast rise)
+        # alpha_release ≈ 0.15 → reaches ~90 % of floor in ~14 frames (slow decay ~450 ms @ 30 fps)
+        self.left_smooth   = 0.0
+        self.right_smooth  = 0.0
+        self.alpha_attack  = float(_disp_cfg.get("vu_alpha_attack",  0.8))
+        self.alpha_release = float(_disp_cfg.get("vu_alpha_release", 0.15))
 
         # ---------- State / threading ----------
         self.latest_state     = None
@@ -204,8 +218,28 @@ class VUScreen(BaseManager):
 
         self.logger.info("VUScreen: update_display_loop exiting.")
 
+    def _is_cava_running(self):
+        try:
+            subprocess.check_call(
+                ['systemctl', 'is-active', '--quiet', 'cava'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def _start_cava_service(self):
+        try:
+            subprocess.run(
+                ['systemctl', 'restart', 'cava'],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            self.logger.info("VUScreen: CAVA service restarted.")
+        except Exception as e:
+            self.logger.error("VUScreen: Failed to restart CAVA: %s", e)
+
     def _read_fifo(self):
-        fifo_path = FIFO_PATH
+        fifo_path = self.fifo_path
         retry_delay = 1.0
         self.logger.info("VUScreen: Spectrum thread started, reading %s", fifo_path)
 
@@ -214,12 +248,20 @@ class VUScreen(BaseManager):
                 time.sleep(retry_delay)
                 continue
             try:
-                with open(fifo_path, "r") as fifo:
-                    for line in fifo:
-                        if not self.running_spectrum:
+                fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+                with os.fdopen(fd, "r") as fifo:
+                    while self.running_spectrum:
+                        ready, _, _ = select.select([fifo], [], [], 0.1)
+                        if not ready:
+                            continue
+                        line = fifo.readline()
+                        if not line:   # EOF — CAVA closed write end
                             break
-                        bars = [int(x) for x in line.strip().split(";") if x.isdigit()]
-                        if bars:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        bars = [int(x) for x in line.split(";") if x.strip().isdigit()]
+                        if 1 <= len(bars) <= 256:
                             self.spectrum_bars = bars
             except Exception as e:
                 self.logger.error("VUScreen: FIFO read error -> %s", e)
@@ -235,6 +277,12 @@ class VUScreen(BaseManager):
         self.is_active = True
         self.display_manager.clear_screen()
         self.logger.info("VUScreen: Activated mode.")
+
+        # Ensure CAVA is running before starting the spectrum thread
+        if self.mode_manager.config.get("cava_enabled", False):
+            if not self._is_cava_running():
+                self.logger.info("VUScreen: CAVA not running — attempting restart.")
+                self._start_cava_service()
 
         # Start spectrum thread
         if self.mode_manager.config.get("cava_enabled", False):
@@ -292,10 +340,20 @@ class VUScreen(BaseManager):
         draw.line([centre, (x_end, y_end)], fill=colour, width=2)
 
     def draw_display(self, data):
-        # Levels
+        # Raw levels from spectrum
         bars = self.spectrum_bars if self.mode_manager.config.get("cava_enabled", False) else [0] * 36
-        left  = sum(bars[:18]) // 18 if len(bars) == 36 else 0
-        right = sum(bars[18:]) // 18 if len(bars) == 36 else 0
+        n = len(bars)
+        half = n // 2
+        raw_left  = sum(bars[:half]) // half if half else 0
+        raw_right = sum(bars[half:]) // half if half else 0
+
+        # Apply VU ballistics: fast attack, slow release
+        alpha_l = self.alpha_attack  if raw_left  > self.left_smooth  else self.alpha_release
+        alpha_r = self.alpha_attack  if raw_right > self.right_smooth else self.alpha_release
+        self.left_smooth  = alpha_l * raw_left  + (1 - alpha_l) * self.left_smooth
+        self.right_smooth = alpha_r * raw_right + (1 - alpha_r) * self.right_smooth
+        left  = int(self.left_smooth)
+        right = int(self.right_smooth)
 
         try:
             frame = self.vu_bg.copy()
@@ -316,7 +374,8 @@ class VUScreen(BaseManager):
         combined = f"{artist} - {title}"
         if len(combined) > 45:
             combined = combined[:42] + "..."
-        text_w, text_h = draw.textsize(combined, font=self.font)
+        _bb = draw.textbbox((0, 0), combined, font=self.font)
+        text_w, text_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
         draw.text(((width - text_w) // 2, -4), combined, font=self.font, fill="white")
 
         # Info line
@@ -324,7 +383,7 @@ class VUScreen(BaseManager):
         bitdepth   = data.get("bitdepth", "N/A")
         volume     = data.get("volume", "N/A")
         info_text  = f"Vol: {volume} / {samplerate} / {bitdepth}"
-        info_w, _  = draw.textsize(info_text, font=self.font_artist)
+        info_w = draw.textbbox((0, 0), info_text, font=self.font_artist)[2]
         draw.text(((width - info_w) // 2, text_h), info_text, font=self.font_artist, fill="white")
 
         self.display_manager.display_pil(frame)

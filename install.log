@@ -1,0 +1,77 @@
+[Quadify Install] Installing system dependencies…
+$ apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install python3 python3-venv python3-dev python3-all-dev i2c-tools python3-smbus lirc lsof libjpeg-dev zlib1g-dev libfreetype6-dev libgirepository1.0-dev libcairo2-dev libffi-dev build-essential libxml2-dev libxslt1-dev libssl-dev python3-gi python3-cairo gir1.2-gtk-3.0 pkg-config libopenjp2-7 libtiff6 liblcms2-dev libwebp-dev libcurl4-openssl-dev python3-rpi.gpio python3-pycurl
+[Quadify Install] Ensuring python3-pip is installed…
+$ apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install python3-pip
+[Quadify Install] Installing Python requirements from: /data/plugins/system_hardware/quadify/quadifyapp/requirements.txt
+$ python3 -m pip install --no-cache-dir --break-system-packages -r /data/plugins/system_hardware/quadify/quadifyapp/requirements.txt
+[Quadify Install] Ensuring critical Python runtime modules are installed…
+[Quadify Install] Installing Node.js deps (production)…
+[Quadify Install] Enabling I2C/SPI & IR overlays…
+$ touch /boot/userconfig.txt
+$ modprobe i2c-dev
+$ modprobe spi-bcm2835
+[Quadify Install] Configuring LIRC (default + /dev/lirc0)…
+$ install -m 644 /data/plugins/system_hardware/quadify/quadifyapp/lirc/lircd.conf /etc/lirc/lircd.conf
+$ mkdir -p /etc/lirc/lircd.conf.d
+$ sh -c for f in /etc/lirc/lircd.conf.d/*.conf; do mv "$f" "$f.disabled"; done 2>/dev/null || true
+$ systemctl restart lircd
+[Quadify Install] LIRC set to driver=default device=/dev/lirc0 and remote installed.
+[Quadify Install] Ensuring /home/volumio/lircd.conf → /etc/lirc/lircd.conf
+$ install -d -m 755 /etc/lirc
+$ install -m 644 /data/plugins/system_hardware/quadify/quadifyapp/lirc/lircd.conf /etc/lirc/lircd.conf
+[Quadify Install] Configuring LIRC post-step…
+$ tee /usr/local/bin/quadify-blank-irexec.sh
+$ chmod +x /usr/local/bin/quadify-blank-irexec.sh
+[Quadify Install] Configuring kernel overlays for On/Off SHIM…
+$ touch /boot/userconfig.txt
+[Quadify Install] On/Off SHIM overlays ensured (BCM17 shutdown, BCM4 poweroff). Reboot required to take effect.
+[Quadify Install] Installing LED-off and clean-poweroff assets…
+$ install -m 755 /data/plugins/system_hardware/quadify/quadifyapp/scripts/quadify-leds-off.py /usr/local/bin/quadify-leds-off.py
+$ install -m 755 /data/plugins/system_hardware/quadify/quadifyapp/scripts/clean-poweroff.sh /usr/local/bin/clean-poweroff.sh
+$ install -m 644 /data/plugins/system_hardware/quadify/quadifyapp/service/quadify-leds-off.service /etc/systemd/system/quadify-leds-off.service
+$ install -m 644 /data/plugins/system_hardware/quadify/quadifyapp/service/volumio-clean-poweroff.service /etc/systemd/system/volumio-clean-poweroff.service
+$ install -d -m 755 /etc/quadify
+$ systemctl daemon-reload
+$ systemctl enable quadify-leds-off.service
+$ systemctl enable volumio-clean-poweroff.service
+[Quadify Install] Shutdown helpers installed.
+[Quadify Install] Installing systemd services…
+[Quadify Install] Installing quadify.service from template
+$ cp /data/plugins/system_hardware/quadify/quadifyapp/service/quadify.service /etc/systemd/system/quadify.service
+$ chmod 644 /etc/systemd/system/quadify.service
+[Quadify Install] Installing quadify-buttonsleds.service from template
+$ cp /data/plugins/system_hardware/quadify/quadifyapp/service/quadify-buttonsleds.service /etc/systemd/system/quadify-buttonsleds.service
+$ chmod 644 /etc/systemd/system/quadify-buttonsleds.service
+[Quadify Install] Installing ir_listener.service from template
+$ cp /data/plugins/system_hardware/quadify/quadifyapp/service/ir_listener.service /etc/systemd/system/ir_listener.service
+$ chmod 644 /etc/systemd/system/ir_listener.service
+$ systemctl daemon-reload
+$ systemctl enable --now ir_listener.service
+[Quadify Install] Installing early_led8.service from template
+$ cp /data/plugins/system_hardware/quadify/quadifyapp/service/early_led8.service /etc/systemd/system/early_led8.service
+$ chmod 644 /etc/systemd/system/early_led8.service
+[Quadify Install] Installing cava.service from template
+$ cp /data/plugins/system_hardware/quadify/quadifyapp/service/cava.service /etc/systemd/system/cava.service
+$ chmod 644 /etc/systemd/system/cava.service
+$ systemctl daemon-reload
+$ systemctl enable --now lircd.service
+$ systemctl enable --now quadify-lirc-post.service
+$ systemctl enable --now quadify.service
+$ systemctl disable --now quadify-buttonsleds.service
+$ systemctl enable early_led8.service
+[Quadify Install] Installing sudoers drop-in for Quadify…
+[Quadify Install] Installing CAVA (local build)…
+$ rm -rf /tmp/cava_build_3597 /data/plugins/system_hardware/quadify/cava
+$ apt-get -y -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold install git libfftw3-dev libasound2-dev libncursesw5-dev libpulse-dev libtool automake autoconf gcc make pkg-config libiniparser-dev
+$ git clone --depth 1 https://github.com/theshepherdmatt/cava.git /tmp/cava_build_3597
+$ mkdir -p /data/plugins/system_hardware/quadify/cava/config
+$ cp /tmp/cava_build_3597/config/default_config /data/plugins/system_hardware/quadify/cava/config/default_config
+$ rm -rf /tmp/cava_build_3597
+[Quadify Install] CAVA installed at /data/plugins/system_hardware/quadify/cava
+[Quadify Install] Configuring MPD FIFO…
+[Quadify Install] FIFO block appended to MPD template.
+$ systemctl daemon-reload
+$ systemctl enable cava.service
+[Quadify Install] Setting permissions on plugin folder…
+$ chown -R volumio:volumio /data/plugins/system_hardware/quadify
+[Quadify Install] Install complete. Reboot recommended.

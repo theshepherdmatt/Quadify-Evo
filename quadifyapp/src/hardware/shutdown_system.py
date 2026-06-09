@@ -37,7 +37,8 @@ def display_shutdown_text(display_manager):
             font = ImageFont.load_default()
         
         text = "Shutting Down..."
-        text_width, text_height = draw.textsize(text, font=font)
+        _bb = draw.textbbox((0, 0), text, font=font)
+        text_width, text_height = _bb[2] - _bb[0], _bb[3] - _bb[1]
         x = (width - text_width) // 2
         y = (height - text_height) // 2
         draw.text((x, y), text, font=font, fill="white")

@@ -20,18 +20,22 @@ class DigitalVUScreen(BaseManager):
     def __init__(self, display_manager, volumio_listener, mode_manager):
         super().__init__(display_manager, volumio_listener, mode_manager)
         self.logger = logging.getLogger(self.__class__.__name__)
-        print("DigitalVUScreen __init__ CALLED")
         self.logger.setLevel(logging.WARNING)
 
         self.display_manager = display_manager
         self.mode_manager = mode_manager
         self.volumio_listener = volumio_listener
 
+        # Derive an assets base relative to this file so fallback paths work
+        # without needing display_manager.assets_base
+        _src_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        _assets_base = os.path.join(_src_dir, "assets")
+
         # ---------------- Fonts ----------------
         try:
             self.font_artist = self.display_manager.fonts.get("DVU_artist_font") or \
                 ImageFont.truetype(
-                    os.path.join(self.display_manager.assets_base, "assets/fonts/OpenSans-Regular.ttf"), 10
+                    os.path.join(_assets_base, "fonts/OpenSans-Regular.ttf"), 10
                 )
         except Exception as e:
             self.logger.error(f"Failed to load artist font: {e}")
@@ -40,7 +44,7 @@ class DigitalVUScreen(BaseManager):
         try:
             self.font_title = self.display_manager.fonts.get("DVU_song_font") or \
                 ImageFont.truetype(
-                    os.path.join(self.display_manager.assets_base, "assets/fonts/OpenSans-Regular.ttf"), 14
+                    os.path.join(_assets_base, "fonts/OpenSans-Regular.ttf"), 14
                 )
         except Exception as e:
             self.logger.error(f"Failed to load title font: {e}")
@@ -50,11 +54,11 @@ class DigitalVUScreen(BaseManager):
         self.font = self.font_title or ImageFont.load_default()
 
         # ---------------- Background image ----------------
-        digitalvuscreen_path = display_manager.config.get(
-            "digitalvuscreen_path", "assets/images/pngs/digitalvuscreen.png"
+        disp_cfg = display_manager.config.get("display", display_manager.config)
+        digitalvuscreen_path = disp_cfg.get(
+            "digitalvuscreen_path",
+            os.path.join(_assets_base, "images/pngs/digitalvuscreen.png")
         )
-        if not os.path.isabs(digitalvuscreen_path):
-            digitalvuscreen_path = os.path.join(display_manager.assets_base, digitalvuscreen_path)
 
         try:
             bg_orig = Image.open(digitalvuscreen_path).convert("RGBA")
@@ -81,6 +85,13 @@ class DigitalVUScreen(BaseManager):
         self.spectrum_thread = None
         self.running_spectrum = False
         self.spectrum_bars = [0] * 36
+        self.fifo_path = disp_cfg.get("fifo_path", FIFO_PATH)
+
+        # VU ballistics
+        self.left_smooth   = 0.0
+        self.right_smooth  = 0.0
+        self.alpha_attack  = float(disp_cfg.get("vu_alpha_attack",  0.8))
+        self.alpha_release = float(disp_cfg.get("vu_alpha_release", 0.15))
 
         # ---------------- State & threading ----------------
         self.latest_state = None
@@ -125,7 +136,7 @@ class DigitalVUScreen(BaseManager):
         Continuously read spectrum data from FIFO.
         Exits quickly when self.running_spectrum = False.
         """
-        fifo_path = FIFO_PATH
+        fifo_path = self.fifo_path
         retry_delay = 1.0
 
         self.logger.info("DigitalVUScreen: Spectrum thread started, reading %s", fifo_path)
@@ -155,8 +166,8 @@ class DigitalVUScreen(BaseManager):
                             continue
 
                         try:
-                            bars = [int(x) for x in line.split(";") if x.isdigit()]
-                            if bars:
+                            bars = [int(x) for x in line.split(";") if x.strip().isdigit()]
+                            if 1 <= len(bars) <= 256:
                                 self.spectrum_bars = bars
                         except Exception as e:
                             self.logger.error("DigitalVUScreen: Failed to parse FIFO line '%s' -> %s", line, e)
@@ -348,15 +359,22 @@ class DigitalVUScreen(BaseManager):
                 self.spectrum_thread.start()
             bars = self.spectrum_bars
 
-        # --- Calculate left/right levels ---
-        left = right = 0
-        if bars and len(bars) == 36:
-            left = sum(bars[:18]) // 18
-            right = sum(bars[18:]) // 18
+        # --- Calculate left/right levels with VU ballistics ---
+        raw_left = raw_right = 0
+        if bars and len(bars) >= 2:
+            half = len(bars) // 2
+            raw_left  = sum(bars[:half]) // half
+            raw_right = sum(bars[half:]) // half
         else:
             self.logger.warning("DigitalVUScreen: Not enough spectrum bars (got %s)", len(bars) if bars else 0)
 
-        self.logger.debug("DigitalVUScreen: Calculated VU levels: left=%s, right=%s", left, right)
+        alpha_l = self.alpha_attack  if raw_left  > self.left_smooth  else self.alpha_release
+        alpha_r = self.alpha_attack  if raw_right > self.right_smooth else self.alpha_release
+        self.left_smooth  = alpha_l * raw_left  + (1 - alpha_l) * self.left_smooth
+        self.right_smooth = alpha_r * raw_right + (1 - alpha_r) * self.right_smooth
+        left  = int(self.left_smooth)
+        right = int(self.right_smooth)
+        self.logger.debug("DigitalVUScreen: VU levels: left=%s, right=%s", left, right)
 
         # --- Frame setup ---
         try:
@@ -385,7 +403,7 @@ class DigitalVUScreen(BaseManager):
         time_y, progress_y = 20, 34
 
         draw.text((2, time_y), current_time, font=self.font_artist, fill="white")
-        dur_w, _ = draw.textsize(total_duration, font=self.font_artist)
+        dur_w = draw.textbbox((0, 0), total_duration, font=self.font_artist)[2]
         draw.text((screen_width - dur_w - 2, time_y), total_duration, font=self.font_artist, fill="white")
 
         draw.line([progress_x, progress_y, progress_x + progress_width, progress_y], fill="white", width=1)
@@ -438,7 +456,8 @@ class DigitalVUScreen(BaseManager):
                 combined = combined[:37] + "..."
 
             # Measure text size
-            text_w, text_h = draw.textsize(combined, font=self.font)
+            _bb = draw.textbbox((0, 0), combined, font=self.font)
+            text_w, text_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
 
             # Draw title (centred, shifted down slightly)
             title_y = -1  # adjust up/down as needed
@@ -449,7 +468,8 @@ class DigitalVUScreen(BaseManager):
             bitdepth   = data.get("bitdepth", "N/A")
             volume     = data.get("volume", "N/A")
             info_text  = f"Vol: {volume} / {samplerate} / {bitdepth}"
-            info_w, info_h = draw.textsize(info_text, font=self.font_artist)
+            _bb = draw.textbbox((0, 0), info_text, font=self.font_artist)
+            info_w, info_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
 
             info_y = progress_y - info_h - 2  # just above progress bar
             draw.text(((screen_width - info_w) // 2, info_y), info_text, font=self.font_artist, fill="white")

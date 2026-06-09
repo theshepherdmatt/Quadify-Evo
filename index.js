@@ -253,10 +253,10 @@ function normaliseNested(p) {
   return p;
 }
 
-// Atomic writer that DOES NOT drop unrelated top-level keys
+// Atomic writer that DOES NOT drop unrelated top-level keys.
+// Delegates to atomicWriteJSON (async) so it never blocks the event loop (#16).
 function writePrefsRaw(obj) {
-  fs.writeFileSync(PREF_TMP, JSON.stringify(obj, null, 2));
-  fs.moveSync(PREF_TMP, PREF_PATH, { overwrite: true });
+  return atomicWriteJSON(PREF_PATH, obj);
 }
 
 
@@ -791,9 +791,10 @@ ControllerQuadify.prototype.setUIConfig = function (data) {
   Object.keys(mergedConfig).forEach(k => this.config.set(k, mergedConfig[k]));
   this.config.save();
 
-  const hwCfg = this.loadConfigYaml();
   return loadRawPreferenceJSON()
     .then(raw => {
+      // Load YAML once here — the outer hwCfg that used to appear before this
+      // .then() was immediately shadowed by this inner declaration (#15).
       const hwCfg      = this.loadConfigYaml();
       const canonical  = buildCanonicalFromAny(raw, hwCfg);
       const desired    = buildPreferenceFromVconf(this.config);

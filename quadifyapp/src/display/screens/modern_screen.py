@@ -2,6 +2,7 @@
 
 import logging
 import os
+import subprocess
 import threading
 import time
 from typing import Optional
@@ -18,6 +19,7 @@ except Exception:  # noqa: BLE001
     IconProvider = None  # type: ignore
 
 FIFO_PATH = "/tmp/display.fifo"  # Path to the FIFO for CAVA data
+
 
 
 class ModernScreen(BaseManager):
@@ -54,6 +56,12 @@ class ModernScreen(BaseManager):
         self.running_spectrum = False
         self.spectrum_thread = None
         self.spectrum_bars = []
+        _disp_cfg = display_manager.config.get("display", display_manager.config)
+        self.fifo_path = _disp_cfg.get("fifo_path", FIFO_PATH)
+        self._spec_brightness = int(_disp_cfg.get("spectrum_brightness", 60))
+        self._spec_peak_brightness = int(_disp_cfg.get("spectrum_peak_brightness", 100))
+        self._spec_bar_width = int(_disp_cfg.get("spectrum_bar_width", 2))
+        self._spec_gap_width = int(_disp_cfg.get("spectrum_gap_width", 3))
         self.spectrum_mode = self.mode_manager.config.get("modern_spectrum_mode", "bars")  # "bars" | "dots" | "scope"
 
         # Dot/scope smoothing state
@@ -71,6 +79,8 @@ class ModernScreen(BaseManager):
         self.scroll_offset_title = 0
         self.scroll_offset_artist = 0
         self.scroll_speed = 2
+        self._title_pause  = self._SCROLL_PAUSE_FRAMES
+        self._artist_pause = self._SCROLL_PAUSE_FRAMES
 
         # State & threading
         self.latest_state = None
@@ -82,6 +92,10 @@ class ModernScreen(BaseManager):
 
         # Keep last-known service to show its icon while paused/stopped
         self.previous_service: Optional[str] = None
+
+        # Volume overlay state (set externally via show_volume_overlay())
+        self._vol_overlay_dir = None   # +1 or -1
+        self._vol_overlay_until = 0.0  # epoch timestamp when it expires
 
         # Display update thread
         self.update_thread = threading.Thread(target=self.update_display_loop, daemon=True)
@@ -155,6 +169,14 @@ class ModernScreen(BaseManager):
         except Exception as e:
             self.logger.warning("ModernScreen: Failed to emit 'getState'. Error => %s", e)
 
+        # Ensure CAVA is running before starting the spectrum thread
+        if self.mode_manager.config.get("cava_enabled", False):
+            if not self._is_cava_running():
+                self.logger.info("ModernScreen: CAVA not running — attempting restart.")
+                self._start_cava_service()
+            else:
+                self.logger.info("ModernScreen: CAVA already running.")
+
         # Start spectrum thread
         if not self.spectrum_thread or not self.spectrum_thread.is_alive():
             self.running_spectrum = True
@@ -190,6 +212,28 @@ class ModernScreen(BaseManager):
         self.display_manager.clear_screen()
         self.logger.info("ModernScreen: Stopped mode and cleared screen.")
 
+    # --------------------------- CAVA helpers ----------------------------
+
+    def _is_cava_running(self):
+        try:
+            subprocess.check_call(
+                ['systemctl', 'is-active', '--quiet', 'cava'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            return True
+        except subprocess.CalledProcessError:
+            return False
+
+    def _start_cava_service(self):
+        try:
+            subprocess.run(
+                ['sudo', 'systemctl', 'restart', 'cava'],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            self.logger.info("ModernScreen: CAVA service restarted.")
+        except Exception as e:
+            self.logger.error("ModernScreen: Failed to restart CAVA: %s", e)
+
     # --------------------------- Spectrum FIFO ---------------------------
 
     def _read_fifo(self):
@@ -197,9 +241,8 @@ class ModernScreen(BaseManager):
         Continuously read spectrum data from FIFO.
         Auto-reconnects if FIFO disappears (e.g. cava restarted).
         """
-        fifo_path = FIFO_PATH
+        fifo_path = self.fifo_path
         retry_delay = 1.0
-
         self.logger.info("ModernScreen: Spectrum thread started, reading %s", fifo_path)
 
         while self.running_spectrum:
@@ -207,7 +250,6 @@ class ModernScreen(BaseManager):
                 self.logger.warning("ModernScreen: FIFO %s not found. Retrying in %.1fs", fifo_path, retry_delay)
                 time.sleep(retry_delay)
                 continue
-
             try:
                 with open(fifo_path, "r") as fifo:
                     for line in fifo:
@@ -232,21 +274,55 @@ class ModernScreen(BaseManager):
 
     # --------------------------- Utilities -------------------------------
 
+    # Frames to hold still before scrolling starts / after one full loop
+    _SCROLL_PAUSE_FRAMES = 25
+
     def reset_scrolling(self):
         self.scroll_offset_title = 0
         self.scroll_offset_artist = 0
+        self._title_pause  = self._SCROLL_PAUSE_FRAMES
+        self._artist_pause = self._SCROLL_PAUSE_FRAMES
 
-    def update_scroll(self, text, font, max_width, scroll_offset):
-        """Return possibly-scrolling text and updated offset."""
-        text_width, _ = font.getsize(text)
+    def _advance_scroll(self, text, font, max_width, offset, pause_attr):
+        """Return (new_offset, scrolling) and decrement the pause counter."""
+        bb = font.getbbox(text)
+        text_width = bb[2] - bb[0]
         if text_width <= max_width:
-            return text, 0, False
+            return 0, False
 
-        scroll_offset += self.scroll_speed
-        if scroll_offset > text_width:
-            scroll_offset = 0
+        pause = getattr(self, pause_attr, 0)
+        if pause > 0:
+            setattr(self, pause_attr, pause - 1)
+            return offset, True          # scrolling=True but offset unchanged
 
-        return text, scroll_offset, True
+        gap = 32
+        total = text_width + gap
+        new_offset = (offset + self.scroll_speed) % total
+        if new_offset < offset:          # wrapped — pause again
+            setattr(self, pause_attr, self._SCROLL_PAUSE_FRAMES)
+        return new_offset, True
+
+    def _blit_scrolling_text(self, base_image, text, font, x, y, max_width, offset):
+        """
+        Render a seamlessly-looping marquee into base_image at (x, y),
+        clipped to max_width pixels wide.
+        """
+        bb = font.getbbox(text)
+        text_width  = bb[2] - bb[0]
+        text_height = bb[3] - bb[1]
+        y_pad = -bb[1]          # shift down so ascenders aren't clipped
+        gap = 32
+        total = text_width + gap
+
+        strip_h = text_height + y_pad + 2
+        strip = Image.new("RGB", (total * 2, strip_h), "black")
+        sd = ImageDraw.Draw(strip)
+        sd.text((0,     y_pad), text, font=font, fill="white")
+        sd.text((total, y_pad), text, font=font, fill="white")
+
+        crop_x = int(offset) % total
+        crop = strip.crop((crop_x, 0, crop_x + max_width, strip_h))
+        base_image.paste(crop, (x, y))
 
     def adjust_volume(self, volume_change):
         if not self.volumio_listener:
@@ -269,6 +345,12 @@ class ModernScreen(BaseManager):
                 self.volumio_listener.socketIO.emit("volume", new_vol)
         except Exception as e:  # noqa: BLE001
             self.logger.error("ModernScreen: error adjusting volume => %s", e)
+
+    def show_volume_overlay(self, direction, duration=2.0):
+        """Request a VOLUME +/- overlay for `duration` seconds (thread-safe)."""
+        self._vol_overlay_dir = direction
+        self._vol_overlay_until = time.time() + duration
+        self.update_event.set()
 
     # --------------------------- Icons -----------------------------------
 
@@ -386,32 +468,39 @@ class ModernScreen(BaseManager):
         line_shift = 6 if not spectrum_enabled else 0  # lift text a touch when spectrum off
 
         # Artist (top)
-        artist_disp, self.scroll_offset_artist, artist_scrolling = self.update_scroll(
-            artist_name, self.font_artist, max_text_width, self.scroll_offset_artist
+        self.scroll_offset_artist, artist_scrolling = self._advance_scroll(
+            artist_name, self.font_artist, max_text_width,
+            self.scroll_offset_artist, "_artist_pause"
         )
-        if artist_scrolling:
-            artist_x = (screen_width // 2) - self.scroll_offset_artist
-        else:
-            text_w, _ = self.font_artist.getsize(artist_disp)
-            artist_x = (screen_width - text_w) // 2
         artist_y = margin - 8
-        draw.text((artist_x, artist_y), artist_disp, font=self.font_artist, fill="white")
+        if artist_scrolling:
+            self._blit_scrolling_text(base_image, artist_name, self.font_artist,
+                                      margin, artist_y, max_text_width,
+                                      self.scroll_offset_artist)
+        else:
+            _bb = self.font_artist.getbbox(artist_name)
+            artist_x = (screen_width - (_bb[2] - _bb[0])) // 2
+            draw.text((artist_x, artist_y), artist_name, font=self.font_artist, fill="white")
 
         # Title
-        title_disp, self.scroll_offset_title, title_scrolling = self.update_scroll(
-            song_title, self.font_title, max_text_width, self.scroll_offset_title
+        self.scroll_offset_title, title_scrolling = self._advance_scroll(
+            song_title, self.font_title, max_text_width,
+            self.scroll_offset_title, "_title_pause"
         )
-        if title_scrolling:
-            title_x = (screen_width // 2) - self.scroll_offset_title
-        else:
-            text_w, _ = self.font_title.getsize(title_disp)
-            title_x = (screen_width - text_w) // 2
         title_y = (margin + 6) + line_shift
-        draw.text((title_x, title_y), title_disp, font=self.font_title, fill="white")
+        if title_scrolling:
+            self._blit_scrolling_text(base_image, song_title, self.font_title,
+                                      margin, title_y, max_text_width,
+                                      self.scroll_offset_title)
+        else:
+            _bb = self.font_title.getbbox(song_title)
+            title_x = (screen_width - (_bb[2] - _bb[0])) // 2
+            draw.text((title_x, title_y), song_title, font=self.font_title, fill="white")
 
-        # Info (samplerate / bitdepth)
+        # Info: samplerate / bitdepth
         info_text = f"{samplerate} / {bitdepth}"
-        info_w, info_h = self.font_info.getsize(info_text)
+        _bb = draw.textbbox((0, 0), info_text, font=self.font_info)
+        info_w = _bb[2] - _bb[0]
         info_x = (screen_width - info_w) // 2
         info_y = (margin + 25) + line_shift
         draw.text((info_x, info_y), info_text, font=self.font_info, fill="white")
@@ -434,13 +523,7 @@ class ModernScreen(BaseManager):
         indicator_x = progress_x + int(progress_width * progress)
         draw.line([indicator_x, progress_y - 2, indicator_x, progress_y + 2], fill="white", width=1)
 
-        # 5) Volume glyph + number (left of progress)
-        vol_glyph_x = progress_x - 32
-        vol_glyph_y = progress_y - 20
-        self._draw_volume_glyph(draw, vol_glyph_x, vol_glyph_y, size=6)
-        draw.text((vol_glyph_x + 10, vol_glyph_y - 4), str(volume), font=self.font_info, fill="white")
-
-        # 6) Service icon near duration (slightly above, right-aligned to text end)
+        # 5) Service icon near duration (slightly above, right-aligned to text end)
         icon_size = 22
         service_icon = None
         # first try state-aware
@@ -456,7 +539,8 @@ class ModernScreen(BaseManager):
                 bg.paste(service_icon, mask=service_icon.split()[3])
                 service_icon = bg
 
-            dur_text_w, dur_text_h = draw.textsize(total_duration, font=self.font_info)
+            _bb = draw.textbbox((0, 0), total_duration, font=self.font_info)
+            dur_text_w, dur_text_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
             right_edge = dur_x + dur_text_w
             SERVICE_ICON_Y_PAD = -3   # how much above the duration baseline
             SERVICE_ICON_X_PAD = -1   # small gap to the right edge
@@ -470,6 +554,24 @@ class ModernScreen(BaseManager):
             icon_y = max(0, min(icon_y, screen_h - icon_size))
 
             base_image.paste(service_icon, (icon_x, icon_y))
+
+        # Volume overlay (drawn last so it sits on top of everything)
+        if self._vol_overlay_dir is not None:
+            if time.time() < self._vol_overlay_until:
+                base_image = Image.new("RGB", self.display_manager.oled.size, "black")
+                draw = ImageDraw.Draw(base_image)
+                w, h = self.display_manager.oled.size
+                tag_font = self.display_manager.fonts.get("playback_medium", self.font_info)
+                arrow_font = self.display_manager.fonts.get("clock_bold", self.font_title)
+                sign = "+" if self._vol_overlay_dir > 0 else "-"
+                tag = "VOLUME"
+                tb = tag_font.getbbox(tag)
+                draw.text(((w - (tb[2] - tb[0])) // 2, h // 2 - 28), tag, font=tag_font, fill="white")
+                ab = arrow_font.getbbox(sign)
+                aw, ah = ab[2] - ab[0], ab[3] - ab[1]
+                draw.text(((w - aw) // 2, h // 2 - ah // 2 + 4), sign, font=arrow_font, fill="white")
+            else:
+                self._vol_overlay_dir = None
 
         # Present
         self.display_manager.display_pil(base_image)
@@ -500,9 +602,9 @@ class ModernScreen(BaseManager):
         if n == 0:
             return
 
-        # Layout
-        bar_width = 2
-        gap_width = 3
+        # Layout — configurable via config.yaml
+        bar_width = self._spec_bar_width
+        gap_width = self._spec_gap_width
         max_height = bar_region_height
         start_x = (width - (n * (bar_width + gap_width))) // 2
         y_base = height + vertical_offset  # bottom of spectrum area
@@ -529,6 +631,13 @@ class ModernScreen(BaseManager):
         peak_decay_px_per_sec = 60.0
         peak_decay = int(peak_decay_px_per_sec * dt)
 
+        bv = self._spec_brightness
+        pv = self._spec_peak_brightness
+        bar_col = (bv, bv, bv)
+        dot_col = (bv, bv, bv)
+        peak_col = (pv, pv, pv)
+        scope_col = (bv, bv, bv)
+
         if self.spectrum_mode == "bars":
             for i, h_t in enumerate(target_heights):
                 h = int(self._dot_prev_heights[i] + alpha * (h_t - self._dot_prev_heights[i]))
@@ -538,12 +647,9 @@ class ModernScreen(BaseManager):
                 x2 = x1 + bar_width
                 y1 = y_base - h
                 y2 = y_base
-                draw.rectangle([x1, y1, x2, y2], fill=(60, 60, 60))
+                draw.rectangle([x1, y1, x2, y2], fill=bar_col)
 
         elif self.spectrum_mode == "dots":
-            dot_colour = (35, 35, 35)
-            peak_colour = (90, 90, 90)
-
             for i, h_t in enumerate(target_heights):
                 h = int(self._dot_prev_heights[i] + alpha * (h_t - self._dot_prev_heights[i]))
                 self._dot_prev_heights[i] = h
@@ -556,12 +662,12 @@ class ModernScreen(BaseManager):
 
                 for d in range(num_dots):
                     y = y_base - (d * dot_pitch) - dot_size
-                    draw.ellipse([x, y, x + dot_size, y + dot_size], fill=dot_colour)
+                    draw.ellipse([x, y, x + dot_size, y + dot_size], fill=dot_col)
 
                 if peak_h > 0:
                     peak_row = max(0, (peak_h // dot_pitch) - 1)
                     y_peak = y_base - (peak_row * dot_pitch) - dot_size
-                    draw.ellipse([x, y_peak, x + dot_size, y_peak + dot_size], fill=peak_colour)
+                    draw.ellipse([x, y_peak, x + dot_size, y_peak + dot_size], fill=peak_col)
 
         elif self.spectrum_mode == "scope":
             scope_data = [int(h) for h in target_heights]
@@ -570,7 +676,7 @@ class ModernScreen(BaseManager):
             for i, val in enumerate(scope_data[1:], 1):
                 x = start_x + i * (bar_width + gap_width)
                 y = y_base - val
-                draw.line([prev_x, prev_y, x, y], fill=(80, 80, 80), width=1)
+                draw.line([prev_x, prev_y, x, y], fill=scope_col, width=1)
                 prev_x, prev_y = x, y
 
     # --------------------------- External actions ------------------------

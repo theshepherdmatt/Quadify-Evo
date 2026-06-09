@@ -16,7 +16,7 @@ class RotaryControl:
         Initializes the RotaryControl with GPIO setup already provided.
         """
         self.logger = logging.getLogger(self.__class__.__name__)
-        self.logger.setLevel(logging.DEBUG)  # Set to DEBUG for detailed logs
+        self.logger.setLevel(logging.INFO)
 
         if gpio_setup is None:
             self.gpio_setup = GPIOSetup(clk_pin=13, dt_pin=5, sw_pin=6)
@@ -36,6 +36,14 @@ class RotaryControl:
         self.last_encoded = self._read_encoder()  # To track the previous state of CLK and DT
         self.full_cycle = 0  # To track full quadrature cycles
         self.button_last_state = self._read_button_state()  # Save the initial state of the button
+
+        self.running = False  # set True in start(), False in stop()
+
+        # Acceleration: track time of last detent to scale step size
+        # fast (< 80 ms) → ×4, medium (< 150 ms) → ×2, slow → ×1
+        self._last_rotation_ts = 0.0
+        self.accel_fast_ms  = 80    # threshold for ×4 step
+        self.accel_medium_ms = 150  # threshold for ×2 step
 
         self.logger.debug("RotaryControl initialized using GPIO setup.")
 
@@ -59,12 +67,13 @@ class RotaryControl:
 
     def start(self):
         """Start listening to rotary events."""
-        self.logger.debug("RotaryControl started listening to rotary events.")
+        self.running = True
+        self.logger.info("RotaryControl started listening to rotary events.")
         try:
             # Read the initial encoder state
             self.last_encoded = self._read_encoder()
 
-            while True:
+            while self.running:
                 # Read the current encoder state
                 current_encoded = self._read_encoder()
 
@@ -85,9 +94,22 @@ class RotaryControl:
                     # Register a single detent after a full cycle
                     if abs(self.full_cycle) == 4:  # Full quadrature cycle detected
                         direction = 1 if self.full_cycle > 0 else -1
-                        self.logger.debug(f"Scrolling in direction: {direction}")
+
+                        # Acceleration: scale step by how fast the encoder is being turned
+                        now = time.time()
+                        elapsed_ms = (now - self._last_rotation_ts) * 1000
+                        self._last_rotation_ts = now
+                        if elapsed_ms < self.accel_fast_ms:
+                            step = 4
+                        elif elapsed_ms < self.accel_medium_ms:
+                            step = 2
+                        else:
+                            step = 1
+
+                        accelerated = direction * step
+                        self.logger.debug(f"Rotation: dir={direction} step={step} elapsed={elapsed_ms:.0f}ms")
                         if self.rotation_callback:
-                            self.rotation_callback(direction)
+                            self.rotation_callback(accelerated)
                         self.full_cycle = 0  # Reset cycle counter
 
                     self.last_encoded = current_encoded  # Update last state
@@ -107,8 +129,10 @@ class RotaryControl:
                             if self.button_callback:
                                 self.button_callback()
 
-                # Update the last state for the button
-                self.button_last_state = button_state
+                # Update the last state for the button.
+                # Re-read the pin so the cached state reflects the actual post-press level
+                # (button_state was captured before the press-wait loop and is stale).
+                self.button_last_state = self._read_button_state()
 
                 # Add a small delay to avoid CPU overuse
                 time.sleep(0.01)
@@ -118,6 +142,7 @@ class RotaryControl:
             self.stop()
 
     def stop(self):
-        """Cleans up GPIO resources using the GPIOSetup instance."""
+        """Signal the polling loop to exit and clean up GPIO resources."""
+        self.running = False
         self.gpio_setup.cleanup()
         self.logger.info("GPIO cleanup complete.")

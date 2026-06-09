@@ -8,6 +8,8 @@ import time
 from PIL import Image, ImageDraw, ImageFont, ImageSequence
 from managers.base_manager import BaseManager  # Or whichever base class your project uses
 
+
+
 class OriginalScreen(BaseManager):
     """
     A screen class for 'Original' playback mode. It uses VolumioListener
@@ -293,8 +295,10 @@ class OriginalScreen(BaseManager):
         sample_unit_y = sample_val_y + 33  # Move the unit further down (change 24 as you like)
 
         val_str = str(sample_val)
-        val_w, val_h = draw.textsize(val_str, font=sample_val_font)
-        unit_w, unit_h = draw.textsize(sample_unit, font=sample_unit_font)
+        _bb = draw.textbbox((0, 0), val_str, font=sample_val_font)
+        val_w, val_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
+        _bb = draw.textbbox((0, 0), sample_unit, font=sample_unit_font)
+        unit_w, unit_h = _bb[2] - _bb[0], _bb[3] - _bb[1]
 
         # Place the numeric value
         val_x = sample_right_x - unit_w - val_w - 4
@@ -307,11 +311,12 @@ class OriginalScreen(BaseManager):
         self.logger.debug("OriginalScreen: Drew sample rate => %s %s", val_str, sample_unit)
 
         # Draw bit depth
+        label = bitdepth
         padding = 15
         x_position = self.display_manager.oled.width - padding
         y_position = 50
-        draw.text((x_position, y_position), bitdepth, font=font_info, fill="white", anchor="rm")
-        self.logger.debug(f"OriginalScreen: Drew bit depth => {bitdepth}")
+        draw.text((x_position, y_position), label, font=font_info, fill="white", anchor="rm")
+        self.logger.debug(f"OriginalScreen: Drew format label => {label}")
 
         # Draw service icon (prefer IconProvider; fallback to display_manager)
         service_icon = None
@@ -330,11 +335,8 @@ class OriginalScreen(BaseManager):
 
             # Align right to the same x as bit depth, and sit just above it
             # x_position is already: self.display_manager.oled.width - padding
-            try:
-                # Pillow >=8: get precise text box (no anchor on bbox, so compute top via height)
-                bw, bh = draw.textsize(bitdepth, font=font_info)
-            except Exception:
-                bw, bh = draw.textsize(bitdepth, font=font_info)
+            _bb = draw.textbbox((0, 0), bitdepth, font=font_info)
+            bw, bh = _bb[2] - _bb[0], _bb[3] - _bb[1]
 
             ICON_X_NUDGE = 5  # tweak this (2–6) to taste
 
@@ -417,12 +419,12 @@ class OriginalScreen(BaseManager):
             from PIL import ImageFont
             font = self.display_manager.fonts.get('error_font', ImageFont.load_default())
 
-            title_w, _ = draw.textsize(title, font=font)
+            title_w = draw.textbbox((0, 0), title, font=font)[2]
             title_x = (self.display_manager.oled.width - title_w) // 2
             title_y = 10
             draw.text((title_x, title_y), title, font=font, fill="red")
 
-            msg_w, _ = draw.textsize(message, font=font)
+            msg_w = draw.textbbox((0, 0), message, font=font)[2]
             msg_x = (self.display_manager.oled.width - msg_w) // 2
             msg_y = title_y + 20
             draw.text((msg_x, msg_y), message, font=font, fill="white")
