@@ -435,6 +435,20 @@ def main():
     ready_stop_event.set()
     logger.info("Continuing to UI startup.")
 
+    # --- Wait for system clock to be NTP-synced before showing the clock (Pi has no RTC) ---
+    def _system_clock_synced():
+        try:
+            out = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                                 capture_output=True, text=True, timeout=3).stdout.strip()
+            return out == "yes"
+        except Exception:
+            return time.localtime().tm_year >= 2024
+    logger.info("Waiting for system clock to sync (max 45s)...")
+    _clk_deadline = time.time() + 45
+    while not _system_clock_synced() and time.time() < _clk_deadline:
+        time.sleep(0.5)
+    logger.info("Clock sync before handoff: %s", _system_clock_synced())
+
     # --- Build full UI stack ---
     clock_config = config.get('clock', {})
     clock = Clock(display_manager, clock_config, volumio_listener)
